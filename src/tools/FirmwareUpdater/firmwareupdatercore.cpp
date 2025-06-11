@@ -378,137 +378,92 @@ QList<sBoard> FirmwareUpdaterCore::getCanBoardsFromDriver(QString driver, int ne
         networkType="socketcan";
     }
     params.put("device", networkType.toLatin1().data());
-    params.put("canDeviceNum", networkId);
     params.put("canTxQueue", 64);
     params.put("canRxQueue", 64);
-    params.put("canTxTimeout", 2000);
-    params.put("canRxTimeout", 2000);
+    params.put("canTxTimeout", 5);
+    params.put("canRxTimeout", 5);
 
-    //try to connect to the driver
-    int ret = downloader.initdriver(params, (verbosity>1) ? true : false);
-
-    if (0 != ret){
-        if(-2 == ret){
-            if(verbosity>0) qDebug() << "FirmwareUpdaterCore::getCanBoardsFromDriver(): Init ETH driver - The ETH board has just jumped to eUpdater\n Connect again";
-            *retString = "FirmwareUpdaterCore::getCanBoardsFromDriver(): Init ETH driver - The ETH board has just jumped to eUpdater\n Connect again";
-            // TODO DIALOG
-        } else {
-            if(verbosity>0) qDebug() << "FirmwareUpdaterCore::getCanBoardsFromDriver(): Init driver failed - Hardware busy or not connected?!";
-            *retString = "Cannot init driver " + driver + "<" +  QString::number(networkId) + "> ... HW is busy or not connected";
-            // TODO DIALOG
+    // Unicast discovery: for each channel and each possible board address
+    for (int channel = 1; channel <= 2; ++channel) {
+        params.put("canDeviceNum", channel);
+        int ret = downloader.initdriver(params, (verbosity>1) ? true : false);
+        if (0 != ret){
+            continue; // Try next channel
         }
-        mutex.unlock();
-        return canBoards;
-    }
-
-
-    ret = downloader.initschede();
-
-    if (ret == -1)
-    {
-        if(verbosity>0) qDebug()  << "FirmwareUpdaterCore::getCanBoardsFromDriver(): No answer received from CAN boards after a successful driver init.";
-        *retString = "No CAN boards found beneath " + driver + "<" + QString::number(networkId) + ">";
+        for (int addr = 1; addr <= 14; ++addr) {
+            // Try to discover a single board at this address (unicast)
+            if (downloader.initSINGLEBOARD(channel, addr) == 0) {
+                for (int i = 0; i < downloader.board_list_size; ++i) {
+                    if (downloader.board_list[i].pid == addr) {
+                        sBoard board = downloader.board_list[i];
+                        board.bus = channel;
+                        canBoards.append(board);
+                        break;
+                    }
+                }
+            }
+        }
         downloader.stopdriver();
-        currentAddress = "";
-        //not_connected_status();
-        mutex.unlock();
-        return canBoards;
-    }
-
-    for(int i=0; i<downloader.board_list_size;i++){
-        canBoards.append(downloader.board_list[i]);
     }
     currentAddress = "";
     currentDriver = driver;
     currentId = networkId;
-
-    //downloader.stopdriver();
     mutex.unlock();
     return canBoards;
-
 }
 
 QList<sBoard > FirmwareUpdaterCore::getCanBoardsFromEth(QString address, QString *retString, int canID, bool force)
 {
     mutex.lock();
-
     if(force){
         downloader.stopdriver();
     }else{
         if(downloader.connected && address != currentAddress && !currentAddress.isEmpty() || (currentAddress.isEmpty() && !currentDriver.isEmpty())){
             downloader.stopdriver();
         }
-
         if(currentAddress == address){
             mutex.unlock();
             return canBoards;
         }
     }
-
-
     canBoards.clear();
     unsigned int remoteAddr;
     unsigned int localAddr;
-
-
-
     if (!compile_ip_addresses(address.toLatin1().data(),&remoteAddr,&localAddr)){
         if(verbosity>0) qDebug() << "FirmwareUpdaterCore::getCanBoardsFromEth(): Init driver failed - Could not find network interface";
-        // TODO DIALOG
         *retString = "Init driver failed - Could not find network interface";
         address = "";
         mutex.unlock();
         return canBoards;
     }
-
-
-    yarp::os::Property params;
-    params.put("device", "ETH");
-    params.put("local", int( localAddr));
-    params.put("remote",int(remoteAddr));
-    params.put("canid",canID);
-
-
-    //try to connect to the driver
-    int ret = downloader.initdriver(params, (verbosity>1) ? true : false);
-
-    if (0 != ret){
-        if(-2 == ret){
-            if(verbosity>0) qDebug() << "FirmwareUpdaterCore::getCanBoardsFromEth((): Init ETH driver - The ETH board has just jumped to eUpdater\n Connect again";
-            *retString = "FirmwareUpdaterCore::getCanBoardsFromEth((): Init ETH driver - The ETH board has just jumped to eUpdater\n Connect again";
-            // TODO DIALOG
-        } else {
-            if(verbosity>0) qDebug() << "FirmwareUpdaterCore::getCanBoardsFromEth((): Init driver failed - Hardware busy or not connected?!";
-            *retString = "FirmwareUpdaterCore::getCanBoardsFromEth(): Init driver failed - Hardware busy or not connected?!";
-            // TODO DIALOG
+    // Unicast discovery: for each channel and each possible board address
+    for (int channel = 1; channel <= 2; ++channel) {
+        yarp::os::Property params;
+        params.put("device", "ETH");
+        params.put("local", int(localAddr));
+        params.put("remote", int(remoteAddr));
+        params.put("canid", channel);
+        int ret = downloader.initdriver(params, (verbosity>1) ? true : false);
+        if (0 != ret){
+            continue; // Try next channel
         }
-        mutex.unlock();
-        return canBoards;
-    }
-
-
-    ret = downloader.initschede();
-
-    if (ret == -1)
-    {
-        if(verbosity>0) qDebug()  << "FirmwareUpdaterCore::getCanBoardsFromEth(): No CAN boards found beneath " << address << " after a successful driver init.";
-        *retString = "No CAN boards found beneath " + address;
+        for (int addr = 1; addr <= 14; ++addr) {
+            if (downloader.initSINGLEBOARD(channel, addr) == 0) {
+                for (int i = 0; i < downloader.board_list_size; ++i) {
+                    if (downloader.board_list[i].pid == addr) {
+                        sBoard board = downloader.board_list[i];
+                        board.bus = channel;
+                        canBoards.append(board);
+                        break;
+                    }
+                }
+            }
+        }
         downloader.stopdriver();
-        address = "";
-        //not_connected_status();
-        mutex.unlock();
-        return canBoards;
-    }
-
-    for(int i=0; i<downloader.board_list_size;i++){
-        canBoards.append(downloader.board_list[i]);
     }
     currentAddress = address;
-
-    //downloader.stopdriver();
     mutex.unlock();
     return canBoards;
-
 }
 
 
@@ -1131,12 +1086,6 @@ bool FirmwareUpdaterCore::uploadCanApplication(QString filename, QString *result
         if (float(downloader.progress)/downloader.file_length >0.50 && print50==false)    {if(verbosity>0) qDebug("programming %s: 50%% done",filename.toLatin1().data()); print50=true;}
         if (float(downloader.progress)/downloader.file_length >0.75 && print75==false)    {if(verbosity>0) qDebug("programming %s: 75%% done",filename.toLatin1().data()); print75=true;}
         if (float(downloader.progress)/downloader.file_length >0.99 && print99==false)    {if(verbosity>0) qDebug("programming %s: finished!",filename.toLatin1().data()); print99=true;}
-
-//        if ((float(downloader.progress)/downloader.file_length > acemortest_progress) && (acemortest_notyetstopped))
-//        {
-//            // place you breakpoint in here.
-//            acemortest_notyetstopped = false;
-//        }
 
         if (ret==1)
         {
