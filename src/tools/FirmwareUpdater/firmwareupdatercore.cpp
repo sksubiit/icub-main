@@ -366,6 +366,7 @@ QList<sBoard> FirmwareUpdaterCore::getCanBoardsFromDriver(QString driver, int ne
     }
 
     canBoards.clear();
+    QSet<QPair<int, int>> discoveredBoards; // Track discovered (channel, addr) pairs
     yarp::os::Property params;
     QString networkType;
     if(driver.contains("CFW2",Qt::CaseInsensitive)){
@@ -391,6 +392,10 @@ QList<sBoard> FirmwareUpdaterCore::getCanBoardsFromDriver(QString driver, int ne
             continue; // Try next channel
         }
         for (int addr = 1; addr <= 14; ++addr) {
+            QPair<int, int> key(channel, addr);
+            if (discoveredBoards.contains(key)) {
+                continue; // Skip already discovered board
+            }
             // Try to discover a single board at this address (unicast)
             if (downloader.initSINGLEBOARD(channel, addr) == 0) {
                 for (int i = 0; i < downloader.board_list_size; ++i) {
@@ -398,6 +403,7 @@ QList<sBoard> FirmwareUpdaterCore::getCanBoardsFromDriver(QString driver, int ne
                         sBoard board = downloader.board_list[i];
                         board.bus = channel;
                         canBoards.append(board);
+                        discoveredBoards.insert(key); // Mark as discovered
                         break;
                     }
                 }
