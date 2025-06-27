@@ -4325,7 +4325,7 @@ int cDownloader::initSINGLEBOARD(int canbus, int canaddress)
         return -1;
     }
 
-    int retries = 5; // Number of retries
+    int retries = 2; // Number of retries
     for (int attempt = 0; attempt < retries; ++attempt)
     {
         txBuffer[0].setId(build_id(ID_MASTER, canaddress));
@@ -4341,17 +4341,23 @@ int cDownloader::initSINGLEBOARD(int canbus, int canaddress)
         }
 
         drv_sleep(0.2); // Wait for response (reduced from 5.0)
+        double tstart = yarp::os::Time::now();
 
-        int read_messages = m_idriver->receive_message(rxBuffer, 10, 0.2); // reduced timeout
+        int read_messages = m_idriver->receive_message(rxBuffer, 10, 0.01); // reduced timeout
 
-        for (int i = 0; i < read_messages; ++i)
-        {
-            yDebug("Received message ID: 0x%x, Data: [%x, %x, %x, %x, %x, %x, %x, %x]",
-                   rxBuffer[i].getId(),
-                   rxBuffer[i].getData()[0], rxBuffer[i].getData()[1], rxBuffer[i].getData()[2],
-                   rxBuffer[i].getData()[3], rxBuffer[i].getData()[4], rxBuffer[i].getData()[5],
-                   rxBuffer[i].getData()[6], rxBuffer[i].getData()[7]);
-        }
+        // double tend = yarp::os::Time::now();
+        // if (read_messages > 0) {
+        //     yInfo("Round-trip time for CAN discovery: %.3f ms", (tend - tstart) * 1000.0);
+        // }
+
+        // for (int i = 0; i < read_messages; ++i)
+        // {
+        //     yDebug("Received message ID: 0x%x, Data: [%x, %x, %x, %x, %x, %x, %x, %x]",
+        //            rxBuffer[i].getId(),
+        //            rxBuffer[i].getData()[0], rxBuffer[i].getData()[1], rxBuffer[i].getData()[2],
+        //            rxBuffer[i].getData()[3], rxBuffer[i].getData()[4], rxBuffer[i].getData()[5],
+        //            rxBuffer[i].getData()[6], rxBuffer[i].getData()[7]);
+        // }
 
         for (int i = 0; i < read_messages; ++i)
         {
