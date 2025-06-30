@@ -381,8 +381,8 @@ QList<sBoard> FirmwareUpdaterCore::getCanBoardsFromDriver(QString driver, int ne
     params.put("device", networkType.toLatin1().data());
     params.put("canTxQueue", 64);
     params.put("canRxQueue", 64);
-    params.put("canTxTimeout", 0.1);
-    params.put("canRxTimeout", 0.1);
+    params.put("canTxTimeout", 0.01);
+    params.put("canRxTimeout", 0.01);
 
     // Unicast discovery: for each channel and each possible board address
     for (int channel = 1; channel <= 2; ++channel) {

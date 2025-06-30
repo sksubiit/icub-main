@@ -4340,8 +4340,8 @@ int cDownloader::initSINGLEBOARD(int canbus, int canaddress)
             return -1;
         }
 
-        drv_sleep(0.2); // Wait for response (reduced from 5.0)
-        double tstart = yarp::os::Time::now();
+        drv_sleep(0.01); // Wait for response (reduced from 5.0)
+        //double tstart = yarp::os::Time::now();
 
         int read_messages = m_idriver->receive_message(rxBuffer, 10, 0.01); // reduced timeout
 
