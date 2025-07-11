@@ -34,6 +34,7 @@ public:
     void setSelectedCanBoard(int index, bool selected, QString ethAddress = "", int deviceId = -1);
     void setSelectedCanBoards(QList <sBoard> selectedBoards, QString address, int deviceId = -1);
     boardInfo2_t getMoreDetails(int boardNum = EthMaintainer::ipv4OfAllSelected, QString *infoString = NULL, eOipv4addr_t *address = NULL);
+    QList<sBoard > getCanBoardsFromEthUnicast(QString address, QString *retString, int canID, bool force);
     QList<sBoard> getCanBoardsFromEth(QString address, QString *retString, int canID = CanPacket::everyCANbus, bool force = false);
     QList<sBoard> getCanBoardsFromDriver(QString driver, int networkId, QString *retString, bool force = false);
     void blinkEthBoards();

@@ -428,6 +428,97 @@ QList<sBoard> FirmwareUpdaterCore::getCanBoardsFromDriver(QString driver, int ne
 
 }
 
+QList<sBoard > FirmwareUpdaterCore::getCanBoardsFromEthUnicast(QString address, QString *retString, int canID, bool force)
+{
+    mutex.lock();
+    if(force){
+        downloader.stopdriver();
+    }else{
+        if(downloader.connected && address != currentAddress && !currentAddress.isEmpty() || (currentAddress.isEmpty() && !currentDriver.isEmpty())){
+            downloader.stopdriver();
+        }
+        if(currentAddress == address){
+            mutex.unlock();
+            return canBoards;
+        }
+    }
+    canBoards.clear();
+    unsigned int remoteAddr;
+    unsigned int localAddr;
+    if (!compile_ip_addresses(address.toLatin1().data(),&remoteAddr,&localAddr)){
+        if(verbosity>0) qDebug() << "FirmwareUpdaterCore::getCanBoardsFromEthUnicast(): Init driver failed - Could not find network interface";
+        *retString = "Init driver failed - Could not find network interface";
+        address = "";
+        mutex.unlock();
+        return canBoards;
+    }
+
+    // Unicast discovery: for each channel and each possible board address
+    // First, discover all boards and add them to a temporary list.
+    QList<sBoard> discoveredBoards;
+    for (int channel = 1; channel <= 2; ++channel) {
+        yarp::os::Property params;
+        params.put("device", "ETH");
+        params.put("local", int(localAddr));
+        params.put("remote", int(remoteAddr));
+        params.put("canid", channel);
+        int ret = downloader.initdriver(params, (verbosity>1) ? true : false);
+        if (0 != ret){
+            continue; // Try next channel
+        }
+        for (int addr = 1; addr <= 14; ++addr) {
+            if (downloader.initSINGLEBOARD(channel, addr) == 0) {
+                // initSINGLEBOARD populates board_list with just one board.
+                if (downloader.board_list_size > 0) {
+                    sBoard board = downloader.board_list[0];
+                    board.bus = channel;
+                    discoveredBoards.append(board);
+                }
+            }
+        }
+        downloader.stopdriver();
+    }
+
+    // Now that we have discovered all boards via unicast, we need to
+    // with all the discovered boards. This ensures that subsequent operations work correctly.
+    yarp::os::Property params;
+    params.put("device", "ETH");
+    params.put("local", int(localAddr));
+    params.put("remote", int(remoteAddr));
+    if(canID != 0)
+        params.put("canid", canID);
+
+    int ret = downloader.initdriver(params, (verbosity>1) ? true : false);
+    if (0 != ret){
+        if(verbosity>0) qDebug() << "FirmwareUpdaterCore::getCanBoardsFromEthUnicast(): Init driver failed";
+        *retString = "Init driver failed";
+        currentAddress = "";
+        mutex.unlock();
+        return canBoards;
+    }
+
+    // Manually populate the downloader's board list
+    downloader.board_list_size = 0;
+    foreach(sBoard b, discoveredBoards) {
+        if(downloader.board_list_size < 256) {
+            downloader.board_list[downloader.board_list_size] = b;
+            downloader.board_list_size++;
+        }
+    }
+
+    // Populate the canBoards list from the discovered boards
+    canBoards = discoveredBoards;
+
+    currentAddress = address;
+    currentDriver = "";
+    currentId = -1;
+
+    mutex.unlock();
+    return canBoards;
+}
+
+
+
 QList<sBoard > FirmwareUpdaterCore::getCanBoardsFromEth(QString address, QString *retString, int canID, bool force)
 {
     mutex.lock();
@@ -1081,12 +1172,6 @@ bool FirmwareUpdaterCore::uploadCanApplication(QString filename,QString *resultS
         if (float(downloader.progress)/downloader.file_length >0.50 && print50==false)    {if(verbosity>0) qDebug("programming %s: 50%% done",filename.toLatin1().data()); print50=true;}
         if (float(downloader.progress)/downloader.file_length >0.75 && print75==false)    {if(verbosity>0) qDebug("programming %s: 75%% done",filename.toLatin1().data()); print75=true;}
         if (float(downloader.progress)/downloader.file_length >0.99 && print99==false)    {if(verbosity>0) qDebug("programming %s: finished!",filename.toLatin1().data()); print99=true;}
-
-//        if ((float(downloader.progress)/downloader.file_length > acemortest_progress) && (acemortest_notyetstopped))
-//        {
-//            // place you breakpoint in here.
-//            acemortest_notyetstopped = false;
-//        }
 
         if (ret==1)
         {

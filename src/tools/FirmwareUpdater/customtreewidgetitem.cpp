@@ -117,7 +117,8 @@ QString CustomTreeWidgetItem::retrieveCanBoards(bool force)
 {
     QString result;
     if(type() == ETH_TREE_NODE){
-        canBoards = core->getCanBoardsFromEth(text(ADDRESS),&result,CanPacket::everyCANbus,force);
+        //canBoards = core->getCanBoardsFromEth(text(ADDRESS),&result,CanPacket::everyCANbus,force);
+        canBoards = core->getCanBoardsFromEthUnicast(text(ADDRESS), &result, CanPacket::everyCANbus, force);  //new method to get can boards from eth in unicast mode, this is bruteforce even the boards with bug can be discovered
     } else if(type() == CAN_TREE_ROOT_NODE){
         QString ttt = text(DEVICEID);
         QString device;

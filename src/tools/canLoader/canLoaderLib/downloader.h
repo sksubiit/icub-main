@@ -182,7 +182,7 @@ float strain_amplifier_discretegain2float(strain2_ampl_discretegain_t c);
 // attention: funtion strain_set_regulationset() does not want strain_regset_inuse but only strain_regset_one/two/three
 int strain_set_regulationset        (int bus, int target_id, int regset = strain_regset_one, int regsetmode = strain_regsetmode_temporary, string *errorstring = NULL);
 int strain_get_regulationset        (int bus, int target_id, int &regset, const int regsetmode = strain_regsetmode_temporary, string *errorstring = NULL);
-
+int initSINGLEBOARD(int canbus, int canaddress);
 
 // the calibration of the offset is meaningful only for the calibration set in use
 int strain_calibrate_offset  (int bus, int target_id, icubCanProto_boardType_t boardtype, unsigned int middle_val, string *errorstring = NULL);
