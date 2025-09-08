@@ -11,6 +11,7 @@ FIND_PACKAGE(icub_firmware_shared REQUIRED)
 # sources
 set(SRCS
     src/test.cpp
+    src/test.h
 )
 
 # target

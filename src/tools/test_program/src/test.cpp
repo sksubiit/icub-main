@@ -1,116 +1,187 @@
-#include <iostream>
-#include <string>
-#include <vector>
-#include <cstring>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include "EoUpdaterProtocol.h"
+#include "test.h"
 
-void print_discover_reply(const eOuprot_cmd_DISCOVER_REPLY_t* reply) {
-    if (reply->reply.res != uprot_RES_OK) {
-        std::cerr << "Received a non-OK result: " << (int)reply->reply.res << std::endl;
-        return;
+class SimpleEthClient
+{
+public:
+    SimpleEthClient(): sock_(-1) {}
+    ~SimpleEthClient() { closeSocket(); }
+
+    bool open(const char *ip, uint16_t port = 3333, double rx_timeout_sec = 1.0)
+    {
+        closeSocket();
+        sock_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock_ < 0) { perror("socket"); return false; }
+
+        memset(&dest_, 0, sizeof(dest_));
+        dest_.sin_family = AF_INET;
+        dest_.sin_port = htons(port);
+        if (inet_pton(AF_INET, ip, &dest_.sin_addr) <= 0) { perror("inet_pton"); closeSocket(); return false; }
+
+        struct timeval tv;
+        tv.tv_sec = static_cast<time_t>(rx_timeout_sec);
+        tv.tv_usec = static_cast<suseconds_t>((rx_timeout_sec - tv.tv_sec) * 1e6);
+        if (setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) { perror("setsockopt"); closeSocket(); return false; }
+
+        return true;
     }
 
-    char mac_str[18];
-    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
-             reply->mac48[0], reply->mac48[1], reply->mac48[2],
-             reply->mac48[3], reply->mac48[4], reply->mac48[5]);
-
-    std::cout << "--- Board Info ---" << std::endl;
-    std::cout << "Board Type: " << (int)reply->boardtype << std::endl;
-    std::cout << "MAC Address: " << mac_str << std::endl;
-    std::cout << "Protocol Version: " << (int)reply->reply.protversion << std::endl;
-    std::cout << "Running Process: " << (int)reply->processes.runningnow << " (1:Updater, 2:Application)" << std::endl;
-    std::cout << "Default to Run: " << (int)reply->processes.def2run << std::endl;
-    std::cout << "------------------" << std::endl;
-}
-
-int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <board_ip> <command>" << std::endl;
-        std::cerr << "Commands: discover, restart, jump2updater" << std::endl;
-        return 1;
+    void closeSocket()
+    {
+        if (sock_ >= 0) { ::close(sock_); sock_ = -1; }
     }
 
-    const char* board_ip = argv[1];
-    std::string command = argv[2];
-    const int board_port = 3333;
-
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        perror("socket");
-        return 1;
+    bool sendRaw(const void *buf, size_t len)
+    {
+        if (sock_ < 0) return false;
+        ssize_t s = sendto(sock_, buf, len, 0, (struct sockaddr*)&dest_, sizeof(dest_));
+        return (s == (ssize_t)len);
     }
 
-    // Set a 1-second receive timeout
-    struct timeval tv;
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        perror("setsockopt");
-        close(sock);
-        return 1;
-    }
+    // Discover: broadcast/unicast discover and print replies until timeout
+    bool discover()
+    {
+        if (sock_ < 0) return false;
+        eOuprot_cmd_DISCOVER_t cmd;
+        memset(&cmd, EOUPROT_VALUE_OF_UNUSED_BYTE, sizeof(cmd));
+        cmd.opc = uprot_OPC_LEGACY_SCAN;
+        cmd.opc2 = uprot_OPC_DISCOVER;
+        cmd.jump2updater = 0;
 
-    struct sockaddr_in dest_addr;
-    memset(&dest_addr, 0, sizeof(dest_addr));
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(board_port);
-    if (inet_pton(AF_INET, board_ip, &dest_addr.sin_addr) <= 0) {
-        perror("inet_pton");
-        close(sock);
-        return 1;
-    }
+        if (!sendRaw(&cmd, sizeof(cmd))) { perror("sendto"); return false; }
+        std::cout << "DISCOVER sent, awaiting replies..." << std::endl;
 
-    if (command == "discover") {
-        eOuprot_cmd_DISCOVER_t discover_cmd;
-        memset(&discover_cmd, 0xFF, sizeof(discover_cmd)); // Fill with 0xFF
-        discover_cmd.opc = uprot_OPC_LEGACY_SCAN;
-        discover_cmd.opc2 = uprot_OPC_DISCOVER;
-        discover_cmd.jump2updater = 0; // Set to 1 to force maintenance
-
-        std::cout << "Sending DISCOVER to " << board_ip << std::endl;
-        sendto(sock, &discover_cmd, sizeof(discover_cmd), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
-
-        char buffer[256];
-        struct sockaddr_in src_addr;
-        socklen_t src_len = sizeof(src_addr);
-        ssize_t len = recvfrom(sock, buffer, sizeof(buffer), 0, (struct sockaddr*)&src_addr, &src_len);
-
-        if (len > 0) {
-            if (len >= sizeof(eOuprot_cmd_DISCOVER_REPLY_t)) {
-                print_discover_reply((eOuprot_cmd_DISCOVER_REPLY_t*)buffer);
-            } else {
-                std::cerr << "Received a packet, but it's too small to be a DISCOVER_REPLY. Size: " << len << std::endl;
+        unsigned char buf[1500];
+        while (true)
+        {
+            socklen_t sl = sizeof(src_);
+            ssize_t r = recvfrom(sock_, buf, sizeof(buf), 0, (struct sockaddr*)&src_, &sl);
+            if (r < 0)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                perror("recvfrom");
+                return false;
             }
-        } else {
-            perror("recvfrom (maybe timeout)");
+            if ((size_t)r >= sizeof(eOuprot_cmd_DISCOVER_REPLY_t))
+            {
+                auto *rep = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY_t*>(buf);
+                print_discover_reply(rep, inet_ntoa(src_.sin_addr));
+            }
+            else
+            {
+                std::cout << "Ignored packet of size " << r << std::endl;
+            }
         }
-
-    } else if (command == "restart") {
-        eOuprot_cmd_RESTART_t restart_cmd;
-        memset(&restart_cmd, 0xFF, sizeof(restart_cmd));
-        restart_cmd.opc = uprot_OPC_RESTART;
-
-        std::cout << "Sending RESTART to " << board_ip << std::endl;
-        sendto(sock, &restart_cmd, sizeof(restart_cmd), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
-        std::cout << "Command sent." << std::endl;
-
-    } else if (command == "jump2updater") {
-        eOuprot_cmd_JUMP2UPDATER_t jump_cmd;
-        memset(&jump_cmd, 0xFF, sizeof(jump_cmd));
-        jump_cmd.opc = uprot_OPC_JUMP2UPDATER;
-
-        std::cout << "Sending JUMP2UPDATER to " << board_ip << std::endl;
-        sendto(sock, &jump_cmd, sizeof(jump_cmd), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
-        std::cout << "Command sent." << std::endl;
-    } else {
-        std::cerr << "Unknown command: " << command << std::endl;
+        return true;
     }
 
-    close(sock);
+    bool jump2updater()
+    {
+
+        eOuprot_cmd_DISCOVER_t cmd;
+        memset(&cmd, EOUPROT_VALUE_OF_UNUSED_BYTE, sizeof(cmd));
+        cmd.opc  = uprot_OPC_LEGACY_SCAN;
+        cmd.opc2 = uprot_OPC_DISCOVER;
+        cmd.jump2updater = 1; // request board to switch to updater (maintenance)
+
+        if (!sendRaw(&cmd, sizeof(cmd))) { perror("sendto"); return false; }
+        std::cout << "DISCOVER (jump2updater=1) sent to request maintenance mode." << std::endl;
+        return true;
+    }
+
+    bool def2run_application()
+    {
+        eOuprot_cmd_DEF2RUN_t cmd;
+        memset(&cmd, EOUPROT_VALUE_OF_UNUSED_BYTE, sizeof(cmd));
+        cmd.opc = uprot_OPC_DEF2RUN;
+        cmd.proc = static_cast<uint8_t>(eApplication); // set default-to-run to application
+        if (!sendRaw(&cmd, sizeof(cmd))) { perror("sendto"); return false; }
+        std::cout << "DEF2RUN -> Application sent." << std::endl;
+        return true;
+    }
+
+    bool restart()
+    {
+        eOuprot_cmd_RESTART_t cmd;
+        memset(&cmd, EOUPROT_VALUE_OF_UNUSED_BYTE, sizeof(cmd));
+        cmd.opc = uprot_OPC_RESTART;
+        if (!sendRaw(&cmd, sizeof(cmd))) { perror("sendto"); return false; }
+        std::cout << "RESTART sent." << std::endl;
+        return true;
+    }
+
+    bool blink()
+    {
+        eOuprot_cmd_BLINK_t cmd;
+        memset(&cmd, EOUPROT_VALUE_OF_UNUSED_BYTE, sizeof(cmd));
+        cmd.opc = uprot_OPC_BLINK;
+        if (!sendRaw(&cmd, sizeof(cmd))) { perror("sendto"); return false; }
+        std::cout << "BLINK sent." << std::endl;
+        return true;
+    }
+
+private:
+    int sock_;
+    struct sockaddr_in dest_;
+    struct sockaddr_in src_;
+
+    static void print_discover_reply(const eOuprot_cmd_DISCOVER_REPLY_t *reply, const char *srcip)
+    {
+        if (!reply) return;
+        std::cout << "---- Discover reply from " << srcip << " ----" << std::endl;
+        std::cout << "Result: " << (int)reply->reply.res << "  ProtVer: " << (int)reply->reply.protversion << std::endl;
+        char mac[18];
+        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 reply->mac48[0], reply->mac48[1], reply->mac48[2],
+                 reply->mac48[3], reply->mac48[4], reply->mac48[5]);
+        std::cout << "MAC: " << mac << "  Type: " << (int)reply->boardtype << std::endl;
+        std::cout << "Running: " << (int)reply->processes.runningnow << "  Def2run: " << (int)reply->processes.def2run << std::endl;
+        std::cout << "Capabilities mask: 0x" << std::hex << reply->capabilities << std::dec << std::endl;
+        std::cout << "----------------------------------------" << std::endl;
+    }
+};
+
+int main(int argc, char *argv[])
+{
+    if (argc < 3)
+    {
+        std::cerr << "Usage: " << argv[0] << " <board_ip> <command>\n"
+                  << "Commands: discover, maintenance|jump2updater, application|def2run_application, restart, blink\n";
+        return 1;
+    }
+
+    const char *ip = argv[1];
+    std::string cmd = argv[2];
+
+    SimpleEthClient client;
+    if (!client.open(ip, 3333, 1.0)) return 1;
+
+    if (cmd == "discover")
+    {
+        client.discover();
+    }
+    else if (cmd == "maintenance" || cmd == "jump2updater")
+    {
+        client.jump2updater();
+    }
+    else if (cmd == "application" || cmd == "def2run_application")
+    {
+        client.def2run_application();
+        sleep(1);
+        client.restart();
+    }
+    else if (cmd == "restart")
+    {
+        client.restart();
+    }
+    else if (cmd == "blink")
+    {
+        client.blink();
+    }
+    else
+    {
+        std::cerr << "Unknown command: " << cmd << std::endl;
+        return 1;
+    }
+
     return 0;
 }
