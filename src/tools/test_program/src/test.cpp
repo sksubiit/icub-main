@@ -12,6 +12,36 @@ public:
         sock_ = ::socket(AF_INET, SOCK_DGRAM, 0);
         if (sock_ < 0) { perror("socket"); return false; }
 
+        // allow quick reuse and bind the local port so replies come back on port 'port' (3333)
+        int on = 1;
+        if (setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0) {
+            perror("setsockopt(SO_REUSEADDR)");
+            // non-fatal: continue
+        }
+        struct sockaddr_in local;
+        memset(&local, 0, sizeof(local));
+        local.sin_family = AF_INET;
+        // Optionally force binding to a specific local IP by exporting LOCAL_IP environment variable
+        const char *local_ip_env = getenv("LOCAL_IP");
+        if (local_ip_env && inet_pton(AF_INET, local_ip_env, &local.sin_addr) <= 0) {
+            perror("inet_pton(LOCAL_IP)");
+            closeSocket();
+            return false;
+        }
+        if (!local_ip_env) local.sin_addr.s_addr = htonl(INADDR_ANY); // bind on all local addresses
+        local.sin_port = htons(port);
+        if (bind(sock_, (struct sockaddr*)&local, sizeof(local)) < 0) {
+            perror("bind");
+            closeSocket();
+            return false;
+        }
+        // print bound local address:port
+        // struct sockaddr_in actual;
+        // socklen_t alen = sizeof(actual);
+        // if (getsockname(sock_, (struct sockaddr*)&actual, &alen) == 0) {
+        //     std::cout << "Socket bound to " << inet_ntoa(actual.sin_addr) << ":" << ntohs(actual.sin_port) << std::endl;
+        // }
+
         memset(&dest_, 0, sizeof(dest_));
         dest_.sin_family = AF_INET;
         dest_.sin_port = htons(port);
@@ -35,6 +65,19 @@ public:
         if (sock_ < 0) return false;
         ssize_t s = sendto(sock_, buf, len, 0, (struct sockaddr*)&dest_, sizeof(dest_));
         return (s == (ssize_t)len);
+
+        // if (s < 0) { perror("sendto"); return false; }
+        // if ((size_t)s != len) {
+        //     std::cerr << "send to wrote " << s << " of " << len << " bytes\n";
+        //     return false;
+        // }
+        // struct sockaddr_in actual;
+        // socklen_t alen = sizeof(actual);
+        // if (getsockname(sock_, (struct sockaddr*)&actual, &alen) == 0) {
+        //     std::cout << "Sent from " << inet_ntoa(actual.sin_addr) << ":" << ntohs(actual.sin_port)
+        //               << " -> " << inet_ntoa(dest_.sin_addr) << ":" << ntohs(dest_.sin_port) << std::endl;
+        // }
+        // return true;
     }
 
     // Discover: broadcast/unicast discover and print replies until timeout
@@ -57,18 +100,37 @@ public:
             ssize_t r = recvfrom(sock_, buf, sizeof(buf), 0, (struct sockaddr*)&src_, &sl);
             if (r < 0)
             {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    std::cout << "Receive timed out, no more replies." << std::endl;
+                    break;
+                }
                 perror("recvfrom");
                 return false;
             }
+
+            const char *srcip = inet_ntoa(src_.sin_addr);
+            // New-style discover reply
             if ((size_t)r >= sizeof(eOuprot_cmd_DISCOVER_REPLY_t))
             {
                 auto *rep = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY_t*>(buf);
-                print_discover_reply(rep, inet_ntoa(src_.sin_addr));
+                // sanity: check opcode in the embedded reply field if available
+                print_discover_reply(rep, srcip);
+            }
+            // Legacy scan reply (older boards)
+            else if ((size_t)r >= sizeof(eOuprot_cmd_LEGACY_SCAN_REPLY_t))
+            {
+                auto *scan = reinterpret_cast<eOuprot_cmd_LEGACY_SCAN_REPLY_t*>(buf);
+                print_legacy_scan_reply(scan, srcip);
             }
             else
             {
-                std::cout << "Ignored packet of size " << r << std::endl;
+                // Unknown / too small: dump raw bytes to help debugging
+                std::cout << "Ignored/unknown packet of size " << r << " from " << srcip << " -- raw:";
+                for (ssize_t i = 0; i < r; ++i)
+                {
+                    printf(" %02X", buf[i]);
+                }
+                std::cout << std::endl;
             }
         }
         return true;
@@ -138,6 +200,24 @@ private:
         std::cout << "Capabilities mask: 0x" << std::hex << reply->capabilities << std::dec << std::endl;
         std::cout << "----------------------------------------" << std::endl;
     }
+
+    static void print_legacy_scan_reply(const eOuprot_cmd_LEGACY_SCAN_REPLY_t *scan, const char *srcip)
+    {
+        if (!scan) return;
+        std::cout << "---- Legacy scan reply from " << srcip << " ----" << std::endl;
+        std::cout << "opc: " << (int)scan->opc
+                  << "  version: " << (int)scan->version.major << "." << (int)scan->version.minor << std::endl;
+        // print mac if present
+        char mac[18] = {0};
+        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 scan->mac48[0], scan->mac48[1], scan->mac48[2],
+                 scan->mac48[3], scan->mac48[4], scan->mac48[5]);
+        std::cout << "MAC: " << mac << std::endl;
+        // ip mask (if present) - print as hex or dotted
+        uint32_t mask = *(uint32_t*)(scan->ipmask);
+        std::cout << "IP mask (raw): 0x" << std::hex << mask << std::dec << std::endl;
+        std::cout << "----------------------------------------" << std::endl;
+    }
 };
 
 int main(int argc, char *argv[])
@@ -153,7 +233,7 @@ int main(int argc, char *argv[])
     std::string cmd = argv[2];
 
     SimpleEthClient client;
-    if (!client.open(ip, 3333, 1.0)) return 1;
+    if (!client.open(ip, 3333, 3.0)) return 1;
 
     if (cmd == "discover")
     {
