@@ -1,12 +1,10 @@
 project(test_program)
 
 # require icub-firmware-shared (guard like other tools)
-# if(NOT ICUB_USE_icub_firmware_shared)
-#   message(STATUS "icub-firmware-shared not selected, disabling test_program")
-#   return()
-# endif()
-
-FIND_PACKAGE(icub_firmware_shared REQUIRED)
+if(NOT ICUB_USE_icub_firmware_shared)
+  message(STATUS "icub-firmware-shared not selected, disabling test_program")
+  return()
+endif()
 
 # sources
 set(SRCS

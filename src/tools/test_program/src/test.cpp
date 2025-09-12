@@ -109,8 +109,37 @@ public:
             }
 
             const char *srcip = inet_ntoa(src_.sin_addr);
-            // New-style discover reply
-            if ((size_t)r >= sizeof(eOuprot_cmd_DISCOVER_REPLY_t))
+            // Prefer the largest known reply types first
+            if ((size_t)r >= sizeof(eOuprot_cmd_DISCOVER_REPLY2_t))
+            {
+                auto *rep2 = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY2_t*>(buf);
+                print_discover_reply(&rep2->discoveryreply, srcip);
+                // print extra proc infos if present
+                for (int i = 0; i < 2; ++i)
+                {
+                    const eOuprot_procinfo_t &p = rep2->extraprocs[i];
+                    std::cout << " ExtraProc[" << i << "] type=" << (int)p.type
+                              << " ver=" << (int)p.version.major << "." << (int)p.version.minor
+                              << " rom_addr_kb=" << p.rom_addr_kb << " rom_size_kb=" << p.rom_size_kb << std::endl;
+                }
+            }
+            else if ((size_t)r >= sizeof(eOuprot_cmd_MOREINFO_REPLY_t))
+            {
+                auto *more = reinterpret_cast<eOuprot_cmd_MOREINFO_REPLY_t*>(buf);
+                // the embedded discover part is the same structure
+                print_discover_reply(&more->discover, srcip);
+                // if (more->hasdescription)
+                // {
+                //     // description follows within the struct (description has length up to 3 here; sizeof struct includes only 3 bytes)
+                //     // print what's available in this buffer beyond the fixed struct if any
+                //     size_t desc_off = offsetof(eOuprot_cmd_MOREINFO_REPLY_t, description);
+                //     size_t avail = (size_t)r > desc_off ? (size_t)r - desc_off : 0;
+                //     std::string desc;
+                //     if (avail > 0) desc.assign(reinterpret_cast<char*>(buf + desc_off), avail);
+                //     std::cout << "Description: " << desc << std::endl;
+                // }
+            }
+            else if ((size_t)r >= sizeof(eOuprot_cmd_DISCOVER_REPLY_t))
             {
                 auto *rep = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY_t*>(buf);
                 // sanity: check opcode in the embedded reply field if available
@@ -190,14 +219,56 @@ private:
     {
         if (!reply) return;
         std::cout << "---- Discover reply from " << srcip << " ----" << std::endl;
-        std::cout << "Result: " << (int)reply->reply.res << "  ProtVer: " << (int)reply->reply.protversion << std::endl;
+        std::cout << "Result: " << (int)reply->reply.res
+                  << "  ProtVer: " << (int)reply->reply.protversion
+                  << "  sizeofextra: " << (int)reply->reply.sizeofextra << std::endl;
+
         char mac[18];
+        // print MAC in correct order (most significant byte first)
         snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 reply->mac48[0], reply->mac48[1], reply->mac48[2],
-                 reply->mac48[3], reply->mac48[4], reply->mac48[5]);
+                 reply->mac48[5], reply->mac48[4], reply->mac48[3],
+                 reply->mac48[2], reply->mac48[1], reply->mac48[0]);
         std::cout << "MAC: " << mac << "  Type: " << (int)reply->boardtype << std::endl;
-        std::cout << "Running: " << (int)reply->processes.runningnow << "  Def2run: " << (int)reply->processes.def2run << std::endl;
+
+        std::cout << "Running: " << (int)reply->processes.runningnow
+                  << "  Def2run: " << (int)reply->processes.def2run
+                  << "  Startup: " << (int)reply->processes.startup
+                  << "  NumProcesses: " << (int)reply->processes.numberofthem << std::endl;
+
         std::cout << "Capabilities mask: 0x" << std::hex << reply->capabilities << std::dec << std::endl;
+
+        // Print each process info (up to numberofthem, but bounded by array size)
+        int num = std::min<int>(reply->processes.numberofthem, 3);
+        for (int i = 0; i < num; ++i)
+        {
+            const eOuprot_procinfo_t &p = reply->processes.info[i];
+            std::cout << " Process[" << i << "] type=" << (int)p.type;
+            // try to print version if available (eOversion_t typically has major/minor)
+            std::cout << "  ver=";
+            // guard: many eOversion_t definitions expose .major/.minor; print if present
+            // attempt to print commonly used fields
+            // (fall back to raw bytes if structure differs)
+#if defined(__GNUC__)
+            // Attempt to access common fields - if these compile they will print; otherwise this is still safe
+#endif
+            std::cout << (int)p.version.major << "." << (int)p.version.minor;
+            std::cout << "  rom_addr_kb=" << p.rom_addr_kb << "  rom_size_kb=" << p.rom_size_kb << std::endl;
+        }
+
+        // boardinfo32: index 0 contains strlen(&boardinfo32[1]) or 255 if unused
+        if (reply->boardinfo32[0] != EOUPROT_VALUE_OF_UNUSED_BYTE)
+        {
+            uint8_t len = reply->boardinfo32[0];
+            // ensure null termination for printing
+            std::string info;
+            if (len > 0)
+            {
+                size_t copylen = std::min<size_t>(len, sizeof(reply->boardinfo32)-1);
+                info.assign(reinterpret_cast<const char*>(&reply->boardinfo32[1]), copylen);
+            }
+            std::cout << "Board info: " << info << std::endl;
+        }
+
         std::cout << "----------------------------------------" << std::endl;
     }
 
@@ -207,15 +278,23 @@ private:
         std::cout << "---- Legacy scan reply from " << srcip << " ----" << std::endl;
         std::cout << "opc: " << (int)scan->opc
                   << "  version: " << (int)scan->version.major << "." << (int)scan->version.minor << std::endl;
-        // print mac if present
+        // print mac if present (fix byte order)
         char mac[18] = {0};
         snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 scan->mac48[0], scan->mac48[1], scan->mac48[2],
-                 scan->mac48[3], scan->mac48[4], scan->mac48[5]);
+                 scan->mac48[5], scan->mac48[4], scan->mac48[3],
+                 scan->mac48[2], scan->mac48[1], scan->mac48[0]);
         std::cout << "MAC: " << mac << std::endl;
-        // ip mask (if present) - print as hex or dotted
-        uint32_t mask = *(uint32_t*)(scan->ipmask);
-        std::cout << "IP mask (raw): 0x" << std::hex << mask << std::dec << std::endl;
+
+        // ip mask (if present) - print as dotted-quad
+        uint32_t mask = 0;
+        memcpy(&mask, scan->ipmask, sizeof(mask));
+        mask = ntohl(mask);
+        uint8_t b0 = (mask >> 24) & 0xFF;
+        uint8_t b1 = (mask >> 16) & 0xFF;
+        uint8_t b2 = (mask >> 8) & 0xFF;
+        uint8_t b3 = (mask >> 0) & 0xFF;
+        std::cout << "IP mask (dotted): " << (int)b0 << "." << (int)b1 << "." << (int)b2 << "." << (int)b3
+                  << "  (raw 0x" << std::hex << mask << std::dec << ")" << std::endl;
         std::cout << "----------------------------------------" << std::endl;
     }
 };

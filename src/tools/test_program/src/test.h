@@ -11,7 +11,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include "EoUpdaterProtocol.h"
-
+#include <algorithm> 
 
 class simpleEthClient
 {
