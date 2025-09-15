@@ -16,6 +16,7 @@
 class simpleEthClient
 {
 public:
+
     simpleEthClient(): sock_(-1) {}
     ~simpleEthClient() { closeSocket(); } 
     bool open(const char *ip, uint16_t port = 3333, double rx_timeout_sec = 1.0);
@@ -25,7 +26,8 @@ public:
     bool jump2updater();
     bool def2run_application();
     bool restart();
-    bool blink();               
+    bool blink();
+
 private:
     int sock_;
     struct sockaddr_in dest_;
