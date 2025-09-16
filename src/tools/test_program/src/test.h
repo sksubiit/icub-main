@@ -12,6 +12,8 @@
 #include <unistd.h>
 #include "EoUpdaterProtocol.h"
 #include <algorithm> 
+#include "EoBoards.h"   
+
 
 class simpleEthClient
 {
@@ -33,5 +35,6 @@ private:
     struct sockaddr_in dest_;
     struct sockaddr_in src_;
     static void print_discover_reply(const eOuprot_cmd_DISCOVER_REPLY_t *reply, const char *srcip);
+    static void print_legacy_scan_reply(const eOuprot_cmd_LEGACY_SCAN_REPLY_t *scan, const char *srcip);  // <--- NEW
 };
 #endif // __TEST_H__

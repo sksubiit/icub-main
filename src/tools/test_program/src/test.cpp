@@ -1,30 +1,5 @@
 #include "test.h"
 
-// helper that used to be a private static member in the cpp-class; keep it file-local
-static void print_legacy_scan_reply(const eOuprot_cmd_LEGACY_SCAN_REPLY_t *scan, const char *srcip)
-{
-    if (!scan) return;
-    std::cout << "---- Legacy scan reply from " << srcip << " ----" << std::endl;
-    std::cout << "opc: " << (int)scan->opc
-              << "  version: " << (int)scan->version.major << "." << (int)scan->version.minor << std::endl;
-    char mac[18] = {0};
-    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-             scan->mac48[5], scan->mac48[4], scan->mac48[3],
-             scan->mac48[2], scan->mac48[1], scan->mac48[0]);
-    std::cout << "MAC: " << mac << std::endl;
-
-    uint32_t mask = 0;
-    memcpy(&mask, scan->ipmask, sizeof(mask));
-    mask = ntohl(mask);
-    uint8_t b0 = (mask >> 24) & 0xFF;
-    uint8_t b1 = (mask >> 16) & 0xFF;
-    uint8_t b2 = (mask >> 8) & 0xFF;
-    uint8_t b3 = (mask >> 0) & 0xFF;
-    std::cout << "IP mask (dotted): " << (int)b0 << "." << (int)b1 << "." << (int)b2 << "." << (int)b3
-              << "  (raw 0x" << std::hex << mask << std::dec << ")" << std::endl;
-    std::cout << "----------------------------------------" << std::endl;
-}
-
 bool simpleEthClient::open(const char *ip, uint16_t port, double rx_timeout_sec)
 {
     closeSocket();
@@ -201,7 +176,24 @@ void simpleEthClient::print_discover_reply(const eOuprot_cmd_DISCOVER_REPLY_t *r
     snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
              reply->mac48[5], reply->mac48[4], reply->mac48[3],
              reply->mac48[2], reply->mac48[1], reply->mac48[0]);
-    std::cout << "MAC: " << mac << "  Type: " << (int)reply->boardtype << std::endl;
+
+    // try to obtain a human readable board name from the boardtype value
+    const char *raw_board_name = eoboards_type2string2(static_cast<eObrd_type_t>(reply->boardtype), static_cast<eObool_t>(0));
+    std::string board_name;
+    if (raw_board_name) {
+        board_name = raw_board_name;
+        const char prefix[] = "eobrd_";
+        if (board_name.rfind(prefix, 0) == 0) { // startswith
+            board_name = board_name.substr(strlen(prefix));
+        }
+    }
+
+    std::cout << "MAC: " << mac << "  Type: " << (int)reply->boardtype;
+    if (!board_name.empty())
+    {
+        std::cout << " ( Board Info: " << board_name << " )";
+    }
+    std::cout << std::endl;
 
     std::cout << "Running: " << (int)reply->processes.runningnow
               << "  Def2run: " << (int)reply->processes.def2run
@@ -220,7 +212,8 @@ void simpleEthClient::print_discover_reply(const eOuprot_cmd_DISCOVER_REPLY_t *r
         std::cout << "  rom_addr_kb=" << p.rom_addr_kb << "  rom_size_kb=" << p.rom_size_kb << std::endl;
     }
 
-    if (reply->boardinfo32[0] != EOUPROT_VALUE_OF_UNUSED_BYTE)
+    // if eoboards mapping did not give a name, fall back to boardinfo32 string if present
+    if ((!board_name.empty()) && reply->boardinfo32[0] != EOUPROT_VALUE_OF_UNUSED_BYTE)
     {
         uint8_t len = reply->boardinfo32[0];
         std::string info;
@@ -229,11 +222,40 @@ void simpleEthClient::print_discover_reply(const eOuprot_cmd_DISCOVER_REPLY_t *r
             size_t copylen = std::min<size_t>(len, sizeof(reply->boardinfo32)-1);
             info.assign(reinterpret_cast<const char*>(&reply->boardinfo32[1]), copylen);
         }
-        std::cout << "Board info: " << info << std::endl;
+        if (!info.empty())
+        {
+            std::cout << "Board info: " << info << std::endl;
+        }
     }
 
     std::cout << "----------------------------------------" << std::endl;
 }
+
+
+void simpleEthClient::print_legacy_scan_reply(const eOuprot_cmd_LEGACY_SCAN_REPLY_t *scan, const char *srcip)
+{
+    if (!scan) return;
+    std::cout << "---- Legacy scan reply from " << srcip << " ----" << std::endl;
+    std::cout << "opc: " << (int)scan->opc
+              << "  version: " << (int)scan->version.major << "." << (int)scan->version.minor << std::endl;
+    char mac[18] = {0};
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             scan->mac48[5], scan->mac48[4], scan->mac48[3],
+             scan->mac48[2], scan->mac48[1], scan->mac48[0]);
+    std::cout << "MAC: " << mac << std::endl;
+
+    uint32_t mask = 0;
+    memcpy(&mask, scan->ipmask, sizeof(mask));
+    mask = ntohl(mask);
+    uint8_t b0 = (mask >> 24) & 0xFF;
+    uint8_t b1 = (mask >> 16) & 0xFF;
+    uint8_t b2 = (mask >> 8) & 0xFF;
+    uint8_t b3 = (mask >> 0) & 0xFF;
+    std::cout << "IP mask (dotted): " << (int)b0 << "." << (int)b1 << "." << (int)b2 << "." << (int)b3
+              << "  (raw 0x" << std::hex << mask << std::dec << ")" << std::endl;
+    std::cout << "----------------------------------------" << std::endl;
+}
+
 
 int main(int argc, char *argv[])
 {
