@@ -9,6 +9,7 @@ endif()
 # sources
 set(SRCS
     src/test.cpp
+    # src/test_discover_10_0_1_1.cpp
     src/test.h
 )
 
