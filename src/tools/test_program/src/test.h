@@ -27,7 +27,8 @@ public:
 
     simpleEthClient(): sock_(-1) {}
     ~simpleEthClient() { closeSocket(); } 
-    bool open(const char *ip, uint16_t port = 3333, double rx_timeout_sec = 1.0);
+    //bool open(const char *ip, uint16_t port = 7777, double rx_timeout_sec = 1.0);
+    bool open(const char *ip, double rx_timeout_sec = 1.0);
     void closeSocket();
     bool sendRaw(const void *buf, size_t len);
     bool discover();

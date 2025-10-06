@@ -219,43 +219,50 @@ bool simpleEthClient::program()
     bool inmaintenance = (discovered.processes.runningnow == eUpdater);
     if (!inmaintenance) {
         std::cout << "Board not in maintenance, requesting jump2updater..." << std::endl;
-        if (!jump2updater()) {
-            std::cerr << "Failed to send jump2updater" << std::endl;
-            return false;
-        }
-        // wait and re-discover
-        sleep(2);
-        // re-run discover and verify
-        eOuprot_cmd_DISCOVER_t cmd2;
-        memset(&cmd2, EOUPROT_VALUE_OF_UNUSED_BYTE, sizeof(cmd2));
-        cmd2.opc = uprot_OPC_LEGACY_SCAN; cmd2.opc2 = uprot_OPC_DISCOVER; cmd2.jump2updater = 0;
-        if (!sendRaw(&cmd2, sizeof(cmd2))) { perror("sendto discover2"); return false; }
-        bool got2 = false;
-        while (true) {
-            sl = sizeof(src_);
-            ssize_t r = recvfrom(sock_, buf, sizeof(buf), 0, (struct sockaddr*)&src_, &sl);
-            if (r < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                perror("recvfrom");
+        int max_retries = 3;
+        for (int attempt = 0; attempt < max_retries; ++attempt) {
+            if (!jump2updater()) {
+                std::cerr << "Failed to send jump2updater, attempt " << (attempt + 1) << " of " << max_retries << std::endl;
+                continue;
+            }
+            sleep(5); // Wait longer for the board to transition
+            // Re-run discover and verify
+            eOuprot_cmd_DISCOVER_t cmd2;
+            memset(&cmd2, EOUPROT_VALUE_OF_UNUSED_BYTE, sizeof(cmd2));
+            cmd2.opc = uprot_OPC_LEGACY_SCAN;
+            cmd2.opc2 = uprot_OPC_DISCOVER;
+            cmd2.jump2updater = 0;
+            if (!sendRaw(&cmd2, sizeof(cmd2))) {
+                perror("sendto discover2");
                 return false;
             }
-            if (src_.sin_addr.s_addr != dest_.sin_addr.s_addr) continue;
-            if ((size_t)r >= sizeof(eOuprot_cmd_DISCOVER_REPLY_t)) {
-                auto *rep = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY_t*>(buf);
-                discovered = *rep;
-                got2 = true;
+            bool got2 = false;
+            while (true) {
+                socklen_t sl = sizeof(src_);
+                ssize_t r = recvfrom(sock_, buf, sizeof(buf), 0, (struct sockaddr*)&src_, &sl);
+                if (r < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                    perror("recvfrom");
+                    return false;
+                }
+                if (src_.sin_addr.s_addr != dest_.sin_addr.s_addr) continue;
+                if ((size_t)r >= sizeof(eOuprot_cmd_DISCOVER_REPLY_t)) {
+                    auto *rep = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY_t*>(buf);
+                    discovered = *rep;
+                    got2 = true;
+                    break;
+                }
+            }
+            if (got2 && discovered.processes.runningnow == eUpdater) {
+                std::cout << "Board entered maintenance mode" << std::endl;
                 break;
             }
-        }
-        if (!got2) {
-            std::cerr << "No discover reply after requesting maintenance" << std::endl;
-            return false;
+            std::cerr << "Board did not enter eUpdater (maintenance) mode, attempt " << (attempt + 1) << " of " << max_retries << std::endl;
         }
         if (discovered.processes.runningnow != eUpdater) {
-            std::cerr << "Board did not enter eUpdater (maintenance) mode" << std::endl;
+            std::cerr << "Board failed to enter maintenance mode after " << max_retries << " attempts" << std::endl;
             return false;
         }
-        std::cout << "Board entered maintenance mode" << std::endl;
     } else {
         std::cout << "Board already in maintenance" << std::endl;
     }
@@ -386,30 +393,16 @@ bool simpleEthClient::program()
     hexf.close();
 
     // send PROG_END: numberofpkts = chunks_sent + 1  (protocol requirement)
-    uint16_t numberofpkts = static_cast<uint16_t>(chunks_sent + 2);
+    uint16_t numberofpkts = static_cast<uint16_t>(chunks_sent + 1);
     std::cout << "Sending PROG_END, chunks_sent=" << chunks_sent << " numberofpkts=" << numberofpkts << std::endl;
 
-    // retry PROG_END a few times in case of transient packet loss
-    const int MAX_END_RETRIES = 3;
-    eOuprot_result_t r_end = uprot_RES_ERR_TRYAGAIN;
-    bool end_ok = false;
-    for (int attempt = 0; attempt < MAX_END_RETRIES; ++attempt) {
-        if (!sendPROG_END(numberofpkts, r_end)) {
-            std::cerr << "PROG_END send/recv attempt " << attempt << " failed (no reply)" << std::endl;
-            usleep(200000);
-            continue;
-        }
-        if (r_end == uprot_RES_OK) { end_ok = true; break; }
-        if (r_end == uprot_RES_ERR_TRYAGAIN) {
-            std::cerr << "PROG_END returned TRYAGAIN, retrying..." << std::endl;
-            usleep(200000);
-            continue;
-        }
-        std::cerr << "PROG_END returned error " << (int)r_end << std::endl;
-        break;
+    eOuprot_result_t r_end;
+    if (!sendPROG_END(numberofpkts, r_end)) {
+        std::cerr << "PROG_END send/recv failed (no reply)" << std::endl;
+        return false;
     }
-    if (!end_ok) {
-        std::cerr << "PROG_END no reply or not acknowledged after retries" << std::endl;
+    if (r_end != uprot_RES_OK) {
+        std::cerr << "PROG_END returned error " << (int)r_end << std::endl;
         return false;
     }
     std::cout << "PROG_END acknowledged, chunks sent: " << chunks_sent << std::endl;
@@ -426,7 +419,7 @@ bool simpleEthClient::program()
     return true;
 }
 
-bool simpleEthClient::open(const char *ip, uint16_t port, double rx_timeout_sec)
+bool simpleEthClient::open(const char *ip, double rx_timeout_sec)
 {
     closeSocket();
     sock_ = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -446,7 +439,7 @@ bool simpleEthClient::open(const char *ip, uint16_t port, double rx_timeout_sec)
         return false;
     }
     if (!local_ip_env) local.sin_addr.s_addr = htonl(INADDR_ANY);
-    local.sin_port = htons(port);
+    local.sin_port = htons(0); // Bind to an ephemeral port
     if (bind(sock_, (struct sockaddr*)&local, sizeof(local)) < 0) {
         perror("bind");
         closeSocket();
@@ -455,7 +448,8 @@ bool simpleEthClient::open(const char *ip, uint16_t port, double rx_timeout_sec)
 
     memset(&dest_, 0, sizeof(dest_));
     dest_.sin_family = AF_INET;
-    dest_.sin_port = htons(port);
+    // Remote/receiver port used by the target remains 3333
+    dest_.sin_port = htons(3333);
     if (inet_pton(AF_INET, ip, &dest_.sin_addr) <= 0) { perror("inet_pton"); closeSocket(); return false; }
 
     struct timeval tv;
@@ -465,6 +459,47 @@ bool simpleEthClient::open(const char *ip, uint16_t port, double rx_timeout_sec)
 
     return true;
 }
+
+// bool simpleEthClient::open(const char *ip, uint16_t port, double rx_timeout_sec)
+// {
+//     closeSocket();
+//     sock_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+//     if (sock_ < 0) { perror("socket"); return false; }
+
+//     int on = 1;
+//     if (setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0) {
+//         perror("setsockopt(SO_REUSEADDR)");
+//     }
+//     struct sockaddr_in local;
+//     memset(&local, 0, sizeof(local));
+//     local.sin_family = AF_INET;
+//     const char *local_ip_env = getenv("LOCAL_IP");
+//     if (local_ip_env && inet_pton(AF_INET, local_ip_env, &local.sin_addr) <= 0) {
+//         perror("inet_pton(LOCAL_IP)");
+//         closeSocket();
+//         return false;
+//     }
+//     if (!local_ip_env) local.sin_addr.s_addr = htonl(INADDR_ANY);
+//     local.sin_port = htons(port);
+//     if (bind(sock_, (struct sockaddr*)&local, sizeof(local)) < 0) {
+//         perror("bind");
+//         closeSocket();
+//         return false;
+//     }
+
+//     memset(&dest_, 0, sizeof(dest_));
+//     dest_.sin_family = AF_INET;
+//     // Remote/receiver port used by the target remains 3333
+//     dest_.sin_port = htons(3333);
+//     if (inet_pton(AF_INET, ip, &dest_.sin_addr) <= 0) { perror("inet_pton"); closeSocket(); return false; }
+
+//     struct timeval tv;
+//     tv.tv_sec = static_cast<time_t>(rx_timeout_sec);
+//     tv.tv_usec = static_cast<suseconds_t>((rx_timeout_sec - tv.tv_sec) * 1e6);
+//     if (setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) { perror("setsockopt"); closeSocket(); return false; }
+
+//     return true;
+// }
 
 void simpleEthClient::closeSocket()
 {
@@ -696,7 +731,9 @@ int main(int argc, char *argv[])
     std::string cmd = argv[2];
 
     simpleEthClient client;
-    if (!client.open(ip, 3333, 3.0)) return 1;
+    // bind locally on 7777 (default), remote/receiver port is 7777 , old board needs more time to reply so 5s timeout
+    //if (!client.open(ip, 7777, 5.0)) return 1;
+    if (!client.open(ip, 5.0)) return 1;
 
     if (cmd == "discover")
     {
