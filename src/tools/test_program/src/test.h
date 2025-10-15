@@ -16,6 +16,17 @@
 #include <cctype>
 #include <limits>
 #include <sys/stat.h>
+#include <thread>
+#include <mutex>
+#include <set>
+#include <regex>
+#include <chrono>
+#include <iomanip>
+#include <limits.h>   
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/types.h>
+#include <fcntl.h>
 
 #include "EoBoards.h"  
 #include "EoUpdaterProtocol.h"
@@ -28,7 +39,7 @@ public:
     simpleEthClient(): sock_(-1) {}
     ~simpleEthClient() { closeSocket(); } 
     //bool open(const char *ip, uint16_t port = 7777, double rx_timeout_sec = 1.0);
-    bool open(const char *ip, double rx_timeout_sec = 1.0);
+    bool open(const char *ip, double rx_timeout_sec = 5.0);
     void closeSocket();
     bool sendRaw(const void *buf, size_t len);
     bool discover();
@@ -37,6 +48,18 @@ public:
     bool restart();
     bool blink();
     bool program(); 
+
+    // Ensure the target at `ip` is in maintenance (eUpdater). Logs progress to `log`.
+    // Returns true if board entered maintenance, false otherwise.
+    bool ensureMaintenance(const char *ip, int max_retries, int retry_delay_sec, std::ostream &log);
+
+    // Orchestrator helpers (tagged to the class)
+    static std::vector<std::string> parseIPsFromNetworkFile(const char *xmlpath);
+    static std::string logname(const std::string &ip);
+
+    // Orchestrator entry: parse network file, prepare all boards in parallel, then program prepared ones.
+    // Returns 0 on full success, non-zero otherwise.
+    static int orchestrateParallelProgram();
 
 private:
     int sock_;
@@ -52,5 +75,8 @@ private:
 
     static void print_discover_reply(const eOuprot_cmd_DISCOVER_REPLY_t *reply, const char *srcip);
     static void print_legacy_scan_reply(const eOuprot_cmd_LEGACY_SCAN_REPLY_t *scan, const char *srcip);  // <--- NEW
+
+    // spawn helper moved into class
+    static pid_t spawn_and_log(const std::string &exe_path, const std::vector<std::string> &args, const std::string &logpath, bool append);
 };
 #endif // __TEST_H__

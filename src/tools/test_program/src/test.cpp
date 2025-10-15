@@ -718,12 +718,56 @@ void simpleEthClient::print_legacy_scan_reply(const eOuprot_cmd_LEGACY_SCAN_REPL
 }
 
 
+std::string simpleEthClient::logname(const std::string &ip)
+{
+    std::string s = ip;
+    for (char &c : s) if (c == '.') c = '_';
+
+    // ensure logs are written to the current working directory (not exe dir)
+    char cwd_buf[PATH_MAX];
+    const char *cwd = getcwd(cwd_buf, sizeof(cwd_buf));
+    std::string prefix = (cwd && cwd[0]) ? std::string(cwd) : std::string(".");
+
+    return prefix + "/" + s + ".log";
+}
+
 int main(int argc, char *argv[])
 {
+    // new helper modes for orchestrator children
+    if (argc == 3 && std::string(argv[1]) == "prepare_ip") {
+        const char *ip = argv[2];
+        simpleEthClient client;
+        // use stdout as log so spawn_and_log captures it
+        bool ok = client.ensureMaintenance(ip, 4, 5, std::cout);
+        return ok ? 0 : 1;
+    }
+    if (argc == 3 && std::string(argv[1]) == "program_ip") {
+        const char *ip = argv[2];
+        simpleEthClient client;
+        if (!client.open(ip, 5.0)) return 2;
+        bool ok = client.program();
+        return ok ? 0 : 1;
+    }
+
+    // Support single-argument orchestrator mode:
+    //   ./test_program parallel_updating
+    //   ./test_program parallel_program
+    if (argc == 2) {
+        std::string single = argv[1];
+        if (single == "parallel_update" || single == "parallel_program") {
+            return simpleEthClient::orchestrateParallelProgram();
+        }
+    }
+    //   ./test_program ip parallel_program
     if (argc < 3)
     {
-        std::cerr << "Usage: " << argv[0] << " <board_ip> <command>\n"
-                  << "Commands: discover, maintenance|jump2updater, application|def2run_application, restart, blink, program\n";
+        std::cerr << "Usage:\n"
+                  << "  " << argv[0] << " <board_ip> <command>\n"
+                  << "    Commands: discover, maintenance|jump2updater, application|def2run_application,\n"
+                  << "              restart, blink, program\n"
+                  << "  OR\n"
+                  << "  " << argv[0] << " parallel_updating\n"
+                  << "    (reads IPs from network.setupFU.xml and runs preparation+programming in parallel)\n";
         return 1;
     }
 
@@ -731,8 +775,7 @@ int main(int argc, char *argv[])
     std::string cmd = argv[2];
 
     simpleEthClient client;
-    // bind locally on 7777 (default), remote/receiver port is 7777 , old board needs more time to reply so 5s timeout
-    //if (!client.open(ip, 7777, 5.0)) return 1;
+    // bind locally on ephemeral port, remote/receiver port is 3333, old board needs more time to reply so 5s timeout
     if (!client.open(ip, 5.0)) return 1;
 
     if (cmd == "discover")
@@ -772,3 +815,267 @@ int main(int argc, char *argv[])
 
     return 0;
 }
+
+// Ensure the target at `ip` is in maintenance (eUpdater). Logs progress to `log`.
+bool simpleEthClient::ensureMaintenance(const char *ip, int max_retries, int retry_delay_sec, std::ostream &log)
+{
+    if (!open(ip, 5.0)) {
+        log << "open(" << ip << ") failed: " << strerror(errno) << "\n";
+        return false;
+    }
+
+    // initial discover (single-shot)
+    eOuprot_cmd_DISCOVER_t cmd;
+    memset(&cmd, EOUPROT_VALUE_OF_UNUSED_BYTE, sizeof(cmd));
+    cmd.opc = uprot_OPC_LEGACY_SCAN;
+    cmd.opc2 = uprot_OPC_DISCOVER;
+    cmd.jump2updater = 0;
+    if (!sendRaw(&cmd, sizeof(cmd))) {
+        log << "sendRaw(discover) failed\n";
+        closeSocket();
+        return false;
+    }
+
+    unsigned char buf[1500];
+    bool got = false;
+    eOuprot_cmd_DISCOVER_REPLY_t discovered = {0};
+    socklen_t sl = sizeof(src_);
+    ssize_t r = recvfrom(sock_, buf, sizeof(buf), 0, (struct sockaddr*)&src_, &sl);
+    if (r > 0 && src_.sin_addr.s_addr == dest_.sin_addr.s_addr) {
+        if ((size_t)r >= sizeof(eOuprot_cmd_DISCOVER_REPLY2_t)) {
+            auto *rep2 = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY2_t*>(buf);
+            discovered = rep2->discoveryreply;
+            got = true;
+        } else if ((size_t)r >= sizeof(eOuprot_cmd_MOREINFO_REPLY_t)) {
+            auto *m = reinterpret_cast<eOuprot_cmd_MOREINFO_REPLY_t*>(buf);
+            discovered = m->discover;
+            got = true;
+        } else if ((size_t)r >= sizeof(eOuprot_cmd_DISCOVER_REPLY_t)) {
+            auto *rep = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY_t*>(buf);
+            discovered = *rep;
+            got = true;
+        }
+    } else if (r < 0 && !(errno == EAGAIN || errno == EWOULDBLOCK)) {
+        log << "recvfrom(discover): " << strerror(errno) << "\n";
+    }
+
+    if (got && discovered.processes.runningnow == eUpdater) {
+        log << ip << ": already in maintenance\n";
+        closeSocket();
+        return true;
+    }
+    log << ip << ": not in maintenance (initial check)\n";
+
+    // attempt jump2updater with retries
+    for (int attempt = 0; attempt < max_retries; ++attempt) {
+        log << ip << ": attempt " << (attempt+1) << "/" << max_retries << " -> jump2updater\n";
+        if (!jump2updater()) {
+            log << ip << ": jump2updater send failed\n";
+        }
+        // wait for device to reboot/enter updater
+        std::this_thread::sleep_for(std::chrono::seconds(retry_delay_sec));
+
+        // re-discover (single-shot)
+        eOuprot_cmd_DISCOVER_t cmd2;
+        memset(&cmd2, EOUPROT_VALUE_OF_UNUSED_BYTE, sizeof(cmd2));
+        cmd2.opc = uprot_OPC_LEGACY_SCAN;
+        cmd2.opc2 = uprot_OPC_DISCOVER;
+        cmd2.jump2updater = 0;
+        if (!sendRaw(&cmd2, sizeof(cmd2))) {
+            log << ip << ": sendRaw(discover2) failed\n";
+            continue;
+        }
+
+        bool got2 = false;
+        socklen_t sl2 = sizeof(src_);
+        ssize_t r2 = recvfrom(sock_, buf, sizeof(buf), 0, (struct sockaddr*)&src_, &sl2);
+        if (r2 > 0 && src_.sin_addr.s_addr == dest_.sin_addr.s_addr) {
+            if ((size_t)r2 >= sizeof(eOuprot_cmd_DISCOVER_REPLY2_t)) {
+                auto *rep2 = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY2_t*>(buf);
+                discovered = rep2->discoveryreply;
+                got2 = true;
+            } else if ((size_t)r2 >= sizeof(eOuprot_cmd_MOREINFO_REPLY_t)) {
+                auto *m = reinterpret_cast<eOuprot_cmd_MOREINFO_REPLY_t*>(buf);
+                discovered = m->discover;
+                got2 = true;
+            } else if ((size_t)r2 >= sizeof(eOuprot_cmd_DISCOVER_REPLY_t)) {
+                auto *rep = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY_t*>(buf);
+                discovered = *rep;
+                got2 = true;
+            }
+        } else if (r2 < 0 && !(errno == EAGAIN || errno == EWOULDBLOCK)) {
+            log << ip << ": recvfrom(discover2): " << strerror(errno) << "\n";
+        }
+
+        if (got2 && discovered.processes.runningnow == eUpdater) {
+            log << ip << ": entered maintenance on attempt " << (attempt+1) << "\n";
+            closeSocket();
+            return true;
+        }
+        log << ip << ": still not in maintenance after attempt " << (attempt+1) << "\n";
+    }
+
+    log << ip << ": failed to enter maintenance after " << max_retries << " attempts\n";
+    closeSocket();
+    return false;
+}
+
+// parse IPs from network xml (line oriented, inspired by findFirmwareForBoard)
+std::vector<std::string> simpleEthClient::parseIPsFromNetworkFile(const char *xmlpath)
+{
+    std::vector<std::string> ips;
+    std::ifstream f(xmlpath);
+    if (!f.is_open()) {
+        std::cerr << "parseIPsFromNetworkFile: cannot open " << xmlpath << "\n";
+        return ips;
+    }
+
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    f.close();
+
+    std::set<std::string> uniq;
+
+    // Find all <ataddress ...> tags, capture attributes block
+    std::regex ataddr_re(R"(<\s*ataddress\b([^>]*)>)", std::regex::icase);
+    std::sregex_iterator it(content.begin(), content.end(), ataddr_re), end;
+
+    std::regex ip_attr(R"(\bip\s*=\s*['"](\d{1,3}(?:\.\d{1,3}){3})['"])", std::regex::icase);
+    std::regex canbus_attr(R"(\bcanbus\s*=)", std::regex::icase);
+    std::regex canadr_attr(R"(\bcanadr\s*=)", std::regex::icase);
+
+    for (; it != end; ++it) {
+        std::string attrs = (*it)[1].str();
+        std::smatch m;
+        if (std::regex_search(attrs, m, ip_attr)) {
+            // skip if canbus or canadr attribute present (these are CAN sub-entries)
+            if (std::regex_search(attrs, canbus_attr) || std::regex_search(attrs, canadr_attr)) {
+                continue;
+            }
+            uniq.insert(m[1].str());
+        }
+    }
+
+    ips.assign(uniq.begin(), uniq.end());
+    return ips;
+}
+
+// helper to spawn the current executable with args and redirect child stdout/stderr to a logfile
+pid_t simpleEthClient::spawn_and_log(const std::string &exe_path, const std::vector<std::string> &args, const std::string &logpath, bool append)
+{
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        // child
+        int flags = O_CREAT | O_WRONLY | (append ? O_APPEND : O_TRUNC);
+        int fd = ::open(logpath.c_str(), flags, 0644);
+        if (fd >= 0) {
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            if (fd > 2) ::close(fd);
+        }
+        // build argv
+        std::vector<char*> argv;
+        argv.reserve(args.size() + 2);
+        argv.push_back(const_cast<char*>(exe_path.c_str()));
+        for (const auto &a : args) argv.push_back(const_cast<char*>(a.c_str()));
+        argv.push_back(nullptr);
+        execv(exe_path.c_str(), argv.data());
+        // if exec fails
+        _exit(127);
+    }
+    // parent returns child's pid
+    return pid;
+}
+
+
+// Orchestrator: parse network file, prepare boards in parallel, program prepared boards in parallel.
+int simpleEthClient::orchestrateParallelProgram()
+{
+    const char *network_xml = "/home/sk/development/robotology-superbuild/src/icub-firmware-build/scripts/network.setupFU.xml";
+    auto ips = simpleEthClient::parseIPsFromNetworkFile(network_xml);
+    if (ips.empty()) {
+        std::cerr << "No IPs found in " << network_xml << std::endl;
+        return 1;
+    }
+
+    std::cout << "Found " << ips.size() << " unique IP(s) to process\n";
+
+    // find current executable path
+    char exe_buf[PATH_MAX];
+    ssize_t elen = readlink("/proc/self/exe", exe_buf, sizeof(exe_buf)-1);
+    std::string exe_path;
+    if (elen > 0) { exe_buf[elen] = '\0'; exe_path = exe_buf; }
+    else { std::cerr << "Cannot resolve /proc/self/exe; aborting\n"; return 4; }
+
+    // Preparation phase (spawn processes to capture full output)
+    std::vector<pid_t> prep_pids;
+    std::vector<std::string> prep_logs;
+    for (const auto &ip : ips) {
+        std::string logfile = simpleEthClient::logname(ip);
+        // spawn prepare helper: program will handle prepare when called with "prepare_ip"
+        // truncate logfile so it's fresh for this run
+        pid_t pid = simpleEthClient::spawn_and_log(exe_path, { "prepare_ip", ip }, logfile, /*append=*/false);
+        if (pid > 0) { prep_pids.push_back(pid); prep_logs.push_back(logfile); }
+        else std::cerr << "Failed to spawn prepare process for " << ip << std::endl;
+    }
+    // wait for prep processes and collect results
+    std::vector<std::string> prepared;
+    std::vector<std::string> not_prepared;
+    for (size_t i = 0; i < prep_pids.size(); ++i) {
+        int status = 0;
+        pid_t w = waitpid(prep_pids[i], &status, 0);
+        (void)w;
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            prepared.push_back(ips[i]);
+        } else {
+            not_prepared.push_back(ips[i]);
+        }
+    }
+
+    // Report preparation summary
+    std::cout << "Preparation complete. prepared=" << prepared.size() << " not_prepared=" << not_prepared.size() << "\n";
+    if (!not_prepared.empty()) {
+        std::cout << "Not prepared boards:\n";
+        for (auto &ip : not_prepared) std::cout << "  " << ip << "\n";
+    }
+    if (prepared.empty()) {
+        std::cerr << "No boards prepared; aborting programming phase\n";
+        return 2;
+    }
+
+    // Programming phase (spawn processes and append to the same per-ip log)
+    std::vector<pid_t> prog_pids;
+    std::vector<std::string> prog_logs;
+    for (const auto &ip : prepared) {
+        std::string logfile = simpleEthClient::logname(ip);
+        pid_t pid = simpleEthClient::spawn_and_log(exe_path, { "program_ip", ip }, logfile, /*append=*/true);
+        if (pid > 0) { prog_pids.push_back(pid); prog_logs.push_back(logfile); }
+        else std::cerr << "Failed to spawn program process for " << ip << std::endl;
+    }
+    std::vector<std::string> prog_ok;
+    std::vector<std::string> prog_failed;
+    for (size_t i = 0; i < prog_pids.size(); ++i) {
+        int status = 0;
+        pid_t w = waitpid(prog_pids[i], &status, 0);
+        (void)w;
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            prog_ok.push_back(prepared[i]);
+        } else {
+            prog_failed.push_back(prepared[i]);
+        }
+    }
+
+    // Final report
+    std::cout << "Programming summary: success=" << prog_ok.size() << " failed=" << prog_failed.size() << "\n";
+    if (!prog_failed.empty()) {
+        std::cout << "Programming failed for:\n";
+        for (auto &ip : prog_failed) std::cout << "  " << ip << "\n";
+    }
+    if (!not_prepared.empty()) {
+        std::cout << "Boards not prepared (skipped programming):\n";
+        for (auto &ip : not_prepared) std::cout << "  " << ip << "\n";
+    }
+
+    return prog_failed.empty() ? 0 : 3;
+}
+
