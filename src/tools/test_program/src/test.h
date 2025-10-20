@@ -38,6 +38,7 @@ public:
 
     simpleEthClient(): sock_(-1) {}
     ~simpleEthClient() { closeSocket(); } 
+
     //bool open(const char *ip, uint16_t port = 7777, double rx_timeout_sec = 1.0);
     bool open(const char *ip, double rx_timeout_sec = 5.0);
     void closeSocket();
@@ -47,15 +48,13 @@ public:
     bool def2run_application();
     bool restart();
     bool blink();
+
+    // normal programming mode
     bool program(); 
 
     // Ensure the target at `ip` is in maintenance (eUpdater). Logs progress to `log`.
     // Returns true if board entered maintenance, false otherwise.
     bool ensureMaintenance(const char *ip, int max_retries, int retry_delay_sec, std::ostream &log);
-
-    // Orchestrator helpers (tagged to the class)
-    static std::vector<std::string> parseIPsFromNetworkFile(const char *xmlpath);
-    static std::string logname(const std::string &ip);
 
     // Orchestrator entry: parse network file, prepare all boards in parallel, then program prepared ones.
     // Returns 0 on full success, non-zero otherwise.
@@ -66,17 +65,22 @@ private:
     struct sockaddr_in dest_;
     struct sockaddr_in src_;
 
-    // helpers
+    // helpers for programming
     bool recvReplyForIP(uint8_t expected_opc, int timeout_ms, eOuprot_result_t &out_res);
     bool findFirmwareForBoard(const std::string &boardname, std::string &out_hexpath);
     bool sendPROG_START(eOuprot_partition2prog_t partition, eOuprot_result_t &out_res);
     bool sendPROG_DATA_chunk(uint32_t address, const uint8_t *data, size_t len, eOuprot_result_t &out_res);
     bool sendPROG_END(uint16_t numberofpkts, eOuprot_result_t &out_res);
 
+    //discover reply printers
     static void print_discover_reply(const eOuprot_cmd_DISCOVER_REPLY_t *reply, const char *srcip);
-    static void print_legacy_scan_reply(const eOuprot_cmd_LEGACY_SCAN_REPLY_t *scan, const char *srcip);  // <--- NEW
+    static void print_legacy_scan_reply(const eOuprot_cmd_LEGACY_SCAN_REPLY_t *scan, const char *srcip);
+    
 
-    // spawn helper moved into class
+
+    // Orchestrator helpers (tagged to the class)
+    static std::vector<std::string> parseIPsFromNetworkFile(const char *xmlpath);
+    static std::string logname(const std::string &ip);
     static pid_t spawn_and_log(const std::string &exe_path, const std::vector<std::string> &args, const std::string &logpath, bool append);
 };
 #endif // __TEST_H__

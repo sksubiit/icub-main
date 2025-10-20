@@ -408,13 +408,13 @@ bool simpleEthClient::program()
     std::cout << "PROG_END acknowledged, chunks sent: " << chunks_sent << std::endl;
 
     // restart the board to run the new application
-    if (!def2run_application()) {
-        std::cerr << "Warning: def2run_application failed" << std::endl;
-    }
-    sleep(1);
-    if (!restart()) {
-        std::cerr << "Warning: restart failed" << std::endl;
-    }
+    // if (!def2run_application()) {
+    //     std::cerr << "Warning: def2run_application failed" << std::endl;
+    // }
+    // sleep(1);
+    // if (!restart()) {
+    //     std::cerr << "Warning: restart failed" << std::endl;
+    // }
 
     return true;
 }
@@ -731,91 +731,6 @@ std::string simpleEthClient::logname(const std::string &ip)
     return prefix + "/" + s + ".log";
 }
 
-int main(int argc, char *argv[])
-{
-    // new helper modes for orchestrator children
-    if (argc == 3 && std::string(argv[1]) == "prepare_ip") {
-        const char *ip = argv[2];
-        simpleEthClient client;
-        // use stdout as log so spawn_and_log captures it
-        bool ok = client.ensureMaintenance(ip, 4, 5, std::cout);
-        return ok ? 0 : 1;
-    }
-    if (argc == 3 && std::string(argv[1]) == "program_ip") {
-        const char *ip = argv[2];
-        simpleEthClient client;
-        if (!client.open(ip, 5.0)) return 2;
-        bool ok = client.program();
-        return ok ? 0 : 1;
-    }
-
-    // Support single-argument orchestrator mode:
-    //   ./test_program parallel_updating
-    //   ./test_program parallel_program
-    if (argc == 2) {
-        std::string single = argv[1];
-        if (single == "parallel_update" || single == "parallel_program") {
-            return simpleEthClient::orchestrateParallelProgram();
-        }
-    }
-    //   ./test_program ip parallel_program
-    if (argc < 3)
-    {
-        std::cerr << "Usage:\n"
-                  << "  " << argv[0] << " <board_ip> <command>\n"
-                  << "    Commands: discover, maintenance|jump2updater, application|def2run_application,\n"
-                  << "              restart, blink, program\n"
-                  << "  OR\n"
-                  << "  " << argv[0] << " parallel_updating\n"
-                  << "    (reads IPs from network.setupFU.xml and runs preparation+programming in parallel)\n";
-        return 1;
-    }
-
-    const char *ip = argv[1];
-    std::string cmd = argv[2];
-
-    simpleEthClient client;
-    // bind locally on ephemeral port, remote/receiver port is 3333, old board needs more time to reply so 5s timeout
-    if (!client.open(ip, 5.0)) return 1;
-
-    if (cmd == "discover")
-    {
-        client.discover();
-    }
-    else if (cmd == "maintenance" || cmd == "jump2updater")
-    {
-        client.jump2updater();
-    }
-    else if (cmd == "application" || cmd == "def2run_application")
-    {
-        client.def2run_application();
-        sleep(1);
-        client.restart();
-    }
-    else if (cmd == "restart")
-    {
-        client.restart();
-    }
-    else if (cmd == "blink")
-    {
-        client.blink();
-    }
-    else if (cmd == "program")
-    {
-        if (!client.program()) {
-            std::cerr << "Programming failed\n";
-            return 1;
-        }
-    }
-    else
-    {
-        std::cerr << "Unknown command: " << cmd << std::endl;
-        return 1;
-    }
-
-    return 0;
-}
-
 // Ensure the target at `ip` is in maintenance (eUpdater). Logs progress to `log`.
 bool simpleEthClient::ensureMaintenance(const char *ip, int max_retries, int retry_delay_sec, std::ostream &log)
 {
@@ -1076,6 +991,127 @@ int simpleEthClient::orchestrateParallelProgram()
         for (auto &ip : not_prepared) std::cout << "  " << ip << "\n";
     }
 
+    // --- Restart phase: restart all successfully programmed boards ---
+    if (!prog_ok.empty()) {
+        std::cout << "Restarting successfully programmed boards (" << prog_ok.size() << ")...\n";
+        std::vector<pid_t> restart_pids;
+        std::vector<std::string> restart_logs;
+        // spawn restart children (append to same per-ip log)
+        for (const auto &ip : prog_ok) {
+            std::string logfile = simpleEthClient::logname(ip);
+            pid_t pid = simpleEthClient::spawn_and_log(exe_path, { "restart_ip", ip }, logfile, /*append=*/true);
+            if (pid > 0) { restart_pids.push_back(pid); restart_logs.push_back(logfile); }
+            else std::cerr << "Failed to spawn restart process for " << ip << std::endl;
+        }
+
+        std::vector<std::string> restart_ok, restart_failed;
+        for (size_t i = 0; i < restart_pids.size(); ++i) {
+            int status = 0;
+            waitpid(restart_pids[i], &status, 0);
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) restart_ok.push_back(prog_ok[i]);
+            else restart_failed.push_back(prog_ok[i]);
+        }
+
+        std::cout << "Restart summary: success=" << restart_ok.size() << " failed=" << restart_failed.size() << "\n";
+        if (!restart_failed.empty()) {
+            std::cout << "Restart failed for:\n";
+            for (auto &ip : restart_failed) std::cout << "  " << ip << "\n";
+        }
+    }
+
     return prog_failed.empty() ? 0 : 3;
 }
 
+
+int main(int argc, char *argv[])
+{
+    // new helper modes for orchestrator children
+    if (argc == 3 && std::string(argv[1]) == "prepare_ip") {
+        const char *ip = argv[2];
+        simpleEthClient client;
+        // use stdout as log so spawn_and_log captures it
+        bool ok = client.ensureMaintenance(ip, 4, 5, std::cout);
+        return ok ? 0 : 1;
+    }
+    if (argc == 3 && std::string(argv[1]) == "program_ip") {
+        const char *ip = argv[2];
+        simpleEthClient client;
+        if (!client.open(ip, 5.0)) return 2;
+        bool ok = client.program();
+        return ok ? 0 : 1;
+    }
+    // child mode: perform def2run + restart for a single IP (used by orchestrator)
+    if (argc == 3 && std::string(argv[1]) == "restart_ip") {
+        const char *ip = argv[2];
+        simpleEthClient client;
+        if (!client.open(ip, 5.0)) {
+            std::cerr << ip << ": open failed for restart\n";
+            return 2;
+        }
+        // attempt def2run_application (best-effort)
+        client.def2run_application();
+        // small delay before restart
+        sleep(1);
+        if (!client.restart()) {
+            std::cerr << ip << ": restart failed\n";
+            return 1;
+        }
+        std::cout << ip << ": restart succeeded\n";
+        return 0;
+    }
+
+    // Support single-argument orchestrator mode:
+    //   ./test_program parallel_updating
+    //   ./test_program parallel_program
+    if (argc == 2) {
+        std::string single = argv[1];
+        if (single == "parallel_update" || single == "parallel_program") {
+            return simpleEthClient::orchestrateParallelProgram();
+        }
+    }
+
+
+    const char *ip = argv[1];
+    std::string cmd = argv[2];
+
+    simpleEthClient client;
+    // bind locally on ephemeral port, remote/receiver port is 3333, old board needs more time to reply so 5s timeout
+    if (!client.open(ip, 5.0)) return 1;
+
+    if (cmd == "discover")
+    {
+        client.discover();
+    }
+    else if (cmd == "maintenance" || cmd == "jump2updater")
+    {
+        client.jump2updater();
+    }
+    else if (cmd == "application" || cmd == "def2run_application")
+    {
+        client.def2run_application();
+        sleep(1);
+        client.restart();
+    }
+    else if (cmd == "restart")
+    {
+        client.restart();
+    }
+    else if (cmd == "blink")
+    {
+        client.blink();
+    }
+    else if (cmd == "program")
+    {
+        if (!client.program()) {
+            std::cerr << "Programming failed\n";
+            return 1;
+        }
+    }
+    else
+    {
+        std::cerr << "Unknown command: " << cmd << std::endl;
+        return 1;
+    }
+
+    return 0;
+}
