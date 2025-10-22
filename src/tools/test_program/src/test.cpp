@@ -94,6 +94,77 @@ bool simpleEthClient::findFirmwareForBoard(const std::string &boardname, std::st
     return false;
 }
 
+// new helper: find firmware file and optional version attribute (version="MAJOR.MINOR") in the <file> tag
+bool simpleEthClient::findFirmwareForBoardWithVersion(const std::string &boardname, std::string &out_hexpath, int &out_major, int &out_minor)
+{
+    out_major = out_minor = -1;
+    const char *xmlpath = "/home/sk/development/robotology-superbuild/src/icub-firmware-build/info/firmware.info.xml";
+    std::ifstream f(xmlpath);
+    if (!f.is_open()) return false;
+
+    std::string line;
+    bool in_correct_board_block = false;
+    std::string foundfile;
+
+    auto tolower_copy = [](std::string s) {
+        for (char &c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+
+    while (std::getline(f, line)) {
+        std::string lower_line = tolower_copy(line);
+
+        if (!in_correct_board_block) {
+            // Look for the start of a board block that matches our board name
+            std::string key = "<board type=\"" + tolower_copy(boardname) + "\"";
+            if (lower_line.find(key) != std::string::npos) {
+                in_correct_board_block = true;
+            }
+        } else {
+            // We are inside the correct board block, look for file and version
+            std::smatch match;
+            std::regex file_re(R"(<\s*file\s*>([^<]+)</file>)");
+            if (std::regex_search(line, match, file_re)) {
+                foundfile = match[1].str();
+            }
+
+            std::regex version_re(R"(<\s*version\s+major\s*=\s*['"](\d+)['"]\s+minor\s*=\s*['"](\d+)['"])");
+            if (std::regex_search(line, match, version_re)) {
+                out_major = std::stoi(match[1].str());
+                out_minor = std::stoi(match[2].str());
+            }
+
+            // If we find the closing board tag, we are done with this block
+            if (lower_line.find("</board>") != std::string::npos) {
+                break;
+            }
+        }
+    }
+    f.close();
+
+    if (foundfile.empty()) {
+        return false;
+    }
+
+    // resolve relative path: xml path parent + foundfile
+    std::string xmls(xmlpath);
+    size_t slash = xmls.rfind('/');
+    std::string dir = (slash == std::string::npos) ? std::string(".") : xmls.substr(0, slash + 1);
+    std::string candidate = dir + foundfile;
+
+    struct stat st;
+    if (stat(candidate.c_str(), &st) == 0) {
+        out_hexpath = candidate;
+        return true;
+    }
+    if (stat(foundfile.c_str(), &st) == 0) {
+        out_hexpath = foundfile;
+        return true;
+    }
+    out_hexpath = candidate;
+    return true;
+}
+
 bool simpleEthClient::sendPROG_START(eOuprot_partition2prog_t partition, eOuprot_result_t &out_res)
 {
     eOuprot_cmd_PROG_START_t cmd;
@@ -732,52 +803,139 @@ std::string simpleEthClient::logname(const std::string &ip)
 }
 
 // Ensure the target at `ip` is in maintenance (eUpdater). Logs progress to `log`.
-bool simpleEthClient::ensureMaintenance(const char *ip, int max_retries, int retry_delay_sec, std::ostream &log)
+int simpleEthClient::ensureMaintenance(const char *ip, int max_retries, int retry_delay_sec, std::ostream &log)
 {
     if (!open(ip, 5.0)) {
-        log << "open(" << ip << ") failed: " << strerror(errno) << "\n";
-        return false;
+        log << ip << ": open() failed: " << strerror(errno) << "\n";
+        return 1;
     }
 
-    // initial discover (single-shot)
+    // initial discover (single-shot command)
     eOuprot_cmd_DISCOVER_t cmd;
     memset(&cmd, EOUPROT_VALUE_OF_UNUSED_BYTE, sizeof(cmd));
     cmd.opc = uprot_OPC_LEGACY_SCAN;
     cmd.opc2 = uprot_OPC_DISCOVER;
     cmd.jump2updater = 0;
     if (!sendRaw(&cmd, sizeof(cmd))) {
-        log << "sendRaw(discover) failed\n";
+        log << ip << ": sendRaw(discover) failed\n";
         closeSocket();
-        return false;
+        return 1;
     }
 
+    // --- Corrected Receive Logic ---
+    // Loop to find the most detailed discover reply available until timeout.
     unsigned char buf[1500];
     bool got = false;
     eOuprot_cmd_DISCOVER_REPLY_t discovered = {0};
-    socklen_t sl = sizeof(src_);
-    ssize_t r = recvfrom(sock_, buf, sizeof(buf), 0, (struct sockaddr*)&src_, &sl);
-    if (r > 0 && src_.sin_addr.s_addr == dest_.sin_addr.s_addr) {
+    bool has_detailed_reply = false;
+
+    while (!has_detailed_reply) {
+        socklen_t sl = sizeof(src_);
+        ssize_t r = recvfrom(sock_, buf, sizeof(buf), 0, (struct sockaddr*)&src_, &sl);
+
+        if (r < 0) {
+            // If we timed out (EAGAIN/EWOULDBLOCK), just break the loop.
+            // If we already got a basic reply, we'll use it. Otherwise, it's a failure.
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+            // For other errors, log and fail.
+            log << ip << ": recvfrom(discover): " << strerror(errno) << "\n";
+            break;
+        }
+
+        // Ignore packets from other IPs
+        if (src_.sin_addr.s_addr != dest_.sin_addr.s_addr) {
+            continue;
+        }
+
+        // Process the packet, from most detailed to least detailed type
         if ((size_t)r >= sizeof(eOuprot_cmd_DISCOVER_REPLY2_t)) {
             auto *rep2 = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY2_t*>(buf);
             discovered = rep2->discoveryreply;
             got = true;
+            has_detailed_reply = true; // This is the best reply, we can stop listening.
         } else if ((size_t)r >= sizeof(eOuprot_cmd_MOREINFO_REPLY_t)) {
             auto *m = reinterpret_cast<eOuprot_cmd_MOREINFO_REPLY_t*>(buf);
             discovered = m->discover;
             got = true;
+            has_detailed_reply = true; // This is also a great reply, stop listening.
         } else if ((size_t)r >= sizeof(eOuprot_cmd_DISCOVER_REPLY_t)) {
-            auto *rep = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY_t*>(buf);
-            discovered = *rep;
-            got = true;
+            // This is a basic reply. We'll take it, but keep listening for a moment
+            // in case a more detailed one is coming right after.
+            if (!got) { // Only store it if we don't have a better one yet.
+                auto *rep = reinterpret_cast<eOuprot_cmd_DISCOVER_REPLY_t*>(buf);
+                discovered = *rep;
+                got = true;
+            }
         }
-    } else if (r < 0 && !(errno == EAGAIN || errno == EWOULDBLOCK)) {
-        log << "recvfrom(discover): " << strerror(errno) << "\n";
+    }
+    // --- End of Corrected Receive Logic ---
+
+    // Attempt to get board's application version (if available)
+    int board_major = -1, board_minor = -1;
+    if (got) {
+        // The process table lists available firmwares. Find the one for 'eApplication'.
+        int num = std::min<int>(discovered.processes.numberofthem, 3);
+        for (int i = 0; i < num; ++i) {
+            const eOuprot_procinfo_t &p = discovered.processes.info[i];
+            if (p.type == static_cast<uint8_t>(eApplication)) {
+                board_major = static_cast<int>(p.version.major);
+                board_minor = static_cast<int>(p.version.minor);
+                log << ip << ": discovered application version " << board_major << "." << board_minor << "\n";
+                break;
+            }
+        }
+    }
+
+    // derive board name to lookup firmware entry (best-effort)
+    std::string board_name;
+    if (got) {
+        const char *raw_board_name = eoboards_type2string2(static_cast<eObrd_type_t>(discovered.boardtype), static_cast<eObool_t>(0));
+        if (raw_board_name) {
+            board_name = raw_board_name;
+            const char prefix[] = "eobrd_";
+            if (board_name.rfind(prefix, 0) == 0) board_name = board_name.substr(strlen(prefix));
+        }
+    }
+
+    // If we have both board name and discovered version, try to read firmware.info.xml version
+    int fw_major = -1, fw_minor = -1;
+    std::string hexpath;
+    bool fw_found = false;
+    if (!board_name.empty()) {
+        if (findFirmwareForBoardWithVersion(board_name, hexpath, fw_major, fw_minor)) {
+            fw_found = true;
+            log << ip << ": firmware entry found: " << hexpath << " version="
+                << (fw_major >= 0 ? std::to_string(fw_major) : std::string("N/A")) << "."
+                << (fw_minor >= 0 ? std::to_string(fw_minor) : std::string("N/A")) << "\n";
+        } else {
+            log << ip << ": firmware entry not found for board '" << board_name << "'\n";
+        }
+    } else {
+        log << ip << ": cannot derive board name from discover to compare versions\n";
+    }
+
+    // If both board and firmware versions are known, compare and skip if up-to-date
+    if (board_major >= 0 && fw_major >= 0) {
+        // if (board_major > fw_major || (board_major == fw_major && board_minor >= fw_minor)) {
+        if (board_major == fw_major && board_minor == fw_minor) {
+            log << ip << ": board version " << board_major << "." << board_minor
+                << " >= firmware " << fw_major << "." << fw_minor << " -> up-to-date, skipping programming\n";
+            closeSocket();
+            return 2; // up-to-date, skip programming
+        } else {
+            log << ip << ": board version " << board_major << "." << board_minor
+                << " < firmware " << fw_major << "." << fw_minor << " -> will update\n";
+        }
+    } else {
+        log << ip << ": version comparison not possible (board/fw version missing), proceeding to ensure maintenance\n";
     }
 
     if (got && discovered.processes.runningnow == eUpdater) {
         log << ip << ": already in maintenance\n";
         closeSocket();
-        return true;
+        return 0; // entered maintenance, needs programming
     }
     log << ip << ": not in maintenance (initial check)\n";
 
@@ -825,14 +983,14 @@ bool simpleEthClient::ensureMaintenance(const char *ip, int max_retries, int ret
         if (got2 && discovered.processes.runningnow == eUpdater) {
             log << ip << ": entered maintenance on attempt " << (attempt+1) << "\n";
             closeSocket();
-            return true;
+            return 0; // entered maintenance
         }
         log << ip << ": still not in maintenance after attempt " << (attempt+1) << "\n";
     }
 
     log << ip << ": failed to enter maintenance after " << max_retries << " attempts\n";
     closeSocket();
-    return false;
+    return 1;
 }
 
 // parse IPs from network xml (line oriented, inspired by findFirmwareForBoard)
@@ -934,29 +1092,54 @@ int simpleEthClient::orchestrateParallelProgram()
         else std::cerr << "Failed to spawn prepare process for " << ip << std::endl;
     }
     // wait for prep processes and collect results
-    std::vector<std::string> prepared;
-    std::vector<std::string> not_prepared;
+    std::vector<std::string> prepared;      // need programming
+    std::vector<std::string> not_prepared;  // failed to prepare
+    std::vector<std::string> up_to_date;    // skipped (already up-to-date)
     for (size_t i = 0; i < prep_pids.size(); ++i) {
         int status = 0;
         pid_t w = waitpid(prep_pids[i], &status, 0);
         (void)w;
-        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-            prepared.push_back(ips[i]);
+        if (WIFEXITED(status)) {
+            int code = WEXITSTATUS(status);
+            if (code == 0) {
+                prepared.push_back(ips[i]); // needs programming
+            } else if (code == 2) {
+                up_to_date.push_back(ips[i]); // skip programming
+            } else {
+                not_prepared.push_back(ips[i]);
+            }
         } else {
             not_prepared.push_back(ips[i]);
         }
     }
 
     // Report preparation summary
-    std::cout << "Preparation complete. prepared=" << prepared.size() << " not_prepared=" << not_prepared.size() << "\n";
+    std::cout << "Preparation complete. prepared=" << prepared.size()
+              << " up_to_date=" << up_to_date.size()
+              << " not_prepared=" << not_prepared.size() << "\n";
     if (!not_prepared.empty()) {
-        std::cout << "Not prepared boards:\n";
+        std::cout << "Not prepared boards (check logs for errors):\n";
         for (auto &ip : not_prepared) std::cout << "  " << ip << "\n";
     }
-    if (prepared.empty()) {
-        std::cerr << "No boards prepared; aborting programming phase\n";
-        return 2;
+    if (!up_to_date.empty()) {
+        std::cout << "Up-to-date boards (skipped programming):\n";
+        for (auto &ip : up_to_date) std::cout << "  " << ip << "\n";
     }
+
+    // Check the outcome of the preparation phase and provide a clear summary.
+    if (prepared.empty()) {
+        if (!up_to_date.empty() && not_prepared.empty()) {
+            // This is the ideal success case where no work was needed.
+            std::cout << "\nSuccess: All boards are already up-to-date. No programming was necessary." << std::endl;
+            return 0; // Return success.
+        } else {
+            // This is a failure case where some boards failed and none could be prepared.
+            std::cerr << "\nFinished: No boards were prepared for programming. Check logs for details on failed boards." << std::endl;
+            return 2; // Return an error code indicating nothing was programmed.
+        }
+    }
+
+    std::cout << "\nProceeding to program " << prepared.size() << " board(s) that require an update...\n";
 
     // Programming phase (spawn processes and append to the same per-ip log)
     std::vector<pid_t> prog_pids;
@@ -1029,9 +1212,10 @@ int main(int argc, char *argv[])
     if (argc == 3 && std::string(argv[1]) == "prepare_ip") {
         const char *ip = argv[2];
         simpleEthClient client;
-        // use stdout as log so spawn_and_log captures it
-        bool ok = client.ensureMaintenance(ip, 4, 5, std::cout);
-        return ok ? 0 : 1;
+        // ensureMaintenance returns 0 for success, 1 for failure, 2 for up-to-date.
+        // The child process should exit with this code directly.
+        int result = client.ensureMaintenance(ip, 4, 5, std::cout);
+        return result;
     }
     if (argc == 3 && std::string(argv[1]) == "program_ip") {
         const char *ip = argv[2];
@@ -1053,7 +1237,7 @@ int main(int argc, char *argv[])
         // small delay before restart
         sleep(1);
         if (!client.restart()) {
-            std::cerr << ip << ": restart failed\n";
+            std::cerr << ip << ": restart failed" << std::endl;
             return 1;
         }
         std::cout << ip << ": restart succeeded\n";

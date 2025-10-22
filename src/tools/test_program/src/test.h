@@ -53,8 +53,13 @@ public:
     bool program(); 
 
     // Ensure the target at `ip` is in maintenance (eUpdater). Logs progress to `log`.
-    // Returns true if board entered maintenance, false otherwise.
-    bool ensureMaintenance(const char *ip, int max_retries, int retry_delay_sec, std::ostream &log);
+    // Returns: 0 => entered maintenance and needs programming,
+    //          2 => already up-to-date (skip programming),
+    //          1 => failure.
+    int ensureMaintenance(const char *ip, int max_retries, int retry_delay_sec, std::ostream &log);
+
+    // find firmware entry and optional version in firmware.info.xml
+    bool findFirmwareForBoardWithVersion(const std::string &boardname, std::string &out_hexpath, int &out_major, int &out_minor);
 
     // Orchestrator entry: parse network file, prepare all boards in parallel, then program prepared ones.
     // Returns 0 on full success, non-zero otherwise.
