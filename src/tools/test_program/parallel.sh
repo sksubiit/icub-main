@@ -18,5 +18,10 @@ fi
 # run from the script directory so logs created by the program end up here
 cd "$script_dir"
 
-echo "Running: $candidate parallel_program (logs will be written to $(pwd))"
-"$candidate" parallel_program
+
+# NETWORK_XML="$(yarp resource --from network.$YARP_ROBOT_NAME.xml | grep '^\".*$' | sed 's/\"//g')"
+NETWORK_XML="/home/sk/development/robotology-superbuild/src/icub-firmware-build/scripts/network.setupFU.xml"
+
+echo "Running: $candidate parallel_program (network file: $NETWORK_XML, logs -> $(pwd))"
+# pass NETWORK_XML via environment
+NETWORK_XML="$NETWORK_XML" "$candidate" parallel_program

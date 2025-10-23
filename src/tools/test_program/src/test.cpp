@@ -1006,6 +1006,19 @@ std::vector<std::string> simpleEthClient::parseIPsFromNetworkFile(const char *xm
     std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     f.close();
 
+    {
+        size_t pos = 0;
+        while ((pos = content.find("<!--", pos)) != std::string::npos) {
+            size_t end = content.find("-->", pos + 4);
+            if (end == std::string::npos) {
+                // unterminated comment: erase from pos to end
+                content.erase(pos);
+                break;
+            }
+            content.erase(pos, (end + 3) - pos);
+        }
+    }
+
     std::set<std::string> uniq;
 
     // Find all <ataddress ...> tags, capture attributes block
@@ -1064,7 +1077,13 @@ pid_t simpleEthClient::spawn_and_log(const std::string &exe_path, const std::vec
 // Orchestrator: parse network file, prepare boards in parallel, program prepared boards in parallel.
 int simpleEthClient::orchestrateParallelProgram()
 {
-    const char *network_xml = "/home/sk/development/robotology-superbuild/src/icub-firmware-build/scripts/network.setupFU.xml";
+    // Require the shell script to provide the network file path via NETWORK_XML.
+    const char *network_xml = getenv("NETWORK_XML");
+    if (network_xml == nullptr || network_xml[0] == '\0') {
+        std::cerr << "ERROR: NETWORK_XML environment variable not set. Aborting.\n";
+        return 1;
+    }
+    //std::cout << "Using network file: " << network_xml << std::endl;
     auto ips = simpleEthClient::parseIPsFromNetworkFile(network_xml);
     if (ips.empty()) {
         std::cerr << "No IPs found in " << network_xml << std::endl;
