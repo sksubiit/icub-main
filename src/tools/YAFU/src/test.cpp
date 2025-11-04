@@ -34,7 +34,7 @@ bool simpleEthClient::recvReplyForIP(uint8_t expected_opc, int timeout_ms, eOupr
 bool simpleEthClient::findFirmwareForBoard(const std::string &boardname, std::string &out_hexpath)
 {
     // path hardcoded relative to repo; adapt if needed
-    const char *xmlpath = "/home/sk/development/robotology-superbuild/src/icub-firmware-build/info/firmware.info.xml";
+    const char *xmlpath = "../../../../../icub-firmware-build/info/firmware.info.xml";
     std::ifstream f(xmlpath);
     if (!f.is_open()) return false;
     std::string line;
@@ -98,7 +98,7 @@ bool simpleEthClient::findFirmwareForBoard(const std::string &boardname, std::st
 bool simpleEthClient::findFirmwareForBoardWithVersion(const std::string &boardname, std::string &out_hexpath, int &out_major, int &out_minor)
 {
     out_major = out_minor = -1;
-    const char *xmlpath = "/home/sk/development/robotology-superbuild/src/icub-firmware-build/info/firmware.info.xml";
+    const char *xmlpath = "../../../../../icub-firmware-build/info/firmware.info.xml";
     std::ifstream f(xmlpath);
     if (!f.is_open()) return false;
 
@@ -1227,12 +1227,10 @@ int simpleEthClient::orchestrateParallelProgram()
 
 int main(int argc, char *argv[])
 {
-    // new helper modes for orchestrator children
+    // preserve existing helper child modes (exact same checks as before)
     if (argc == 3 && std::string(argv[1]) == "prepare_ip") {
         const char *ip = argv[2];
         simpleEthClient client;
-        // ensureMaintenance returns 0 for success, 1 for failure, 2 for up-to-date.
-        // The child process should exit with this code directly.
         int result = client.ensureMaintenance(ip, 4, 5, std::cout);
         return result;
     }
@@ -1243,7 +1241,6 @@ int main(int argc, char *argv[])
         bool ok = client.program();
         return ok ? 0 : 1;
     }
-    // child mode: perform def2run + restart for a single IP (used by orchestrator)
     if (argc == 3 && std::string(argv[1]) == "restart_ip") {
         const char *ip = argv[2];
         simpleEthClient client;
@@ -1251,9 +1248,7 @@ int main(int argc, char *argv[])
             std::cerr << ip << ": open failed for restart\n";
             return 2;
         }
-        // attempt def2run_application (best-effort)
         client.def2run_application();
-        // small delay before restart
         sleep(1);
         if (!client.restart()) {
             std::cerr << ip << ": restart failed" << std::endl;
@@ -1263,9 +1258,7 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    // Support single-argument orchestrator mode:
-    //   ./test_program parallel_updating
-    //   ./test_program parallel_program
+    // Support single-argument orchestrator mode (unchanged)
     if (argc == 2) {
         std::string single = argv[1];
         if (single == "parallel_update" || single == "parallel_program") {
@@ -1273,48 +1266,56 @@ int main(int argc, char *argv[])
         }
     }
 
+    // Flexible parsing: accept either "<ip> <cmd>" or "<cmd> <ip>"
+    if (argc >= 3) {
+        const char *a = argv[1];
+        const char *b = argv[2];
+        auto is_ip = [](const char *s)->bool {
+            if (!s) return false;
+            struct in_addr ina;
+            return inet_pton(AF_INET, s, &ina) == 1;
+        };
 
-    const char *ip = argv[1];
-    std::string cmd = argv[2];
-
-    simpleEthClient client;
-    // bind locally on ephemeral port, remote/receiver port is 3333, old board needs more time to reply so 5s timeout
-    if (!client.open(ip, 5.0)) return 1;
-
-    if (cmd == "discover")
-    {
-        client.discover();
-    }
-    else if (cmd == "maintenance" || cmd == "jump2updater")
-    {
-        client.jump2updater();
-    }
-    else if (cmd == "application" || cmd == "def2run_application")
-    {
-        client.def2run_application();
-        sleep(1);
-        client.restart();
-    }
-    else if (cmd == "restart")
-    {
-        client.restart();
-    }
-    else if (cmd == "blink")
-    {
-        client.blink();
-    }
-    else if (cmd == "program")
-    {
-        if (!client.program()) {
-            std::cerr << "Programming failed\n";
+        const char *ip = nullptr;
+        const char *cmd = nullptr;
+        if (is_ip(a)) {
+            ip = a; cmd = b;
+        } else if (is_ip(b)) {
+            ip = b; cmd = a;
+        } else {
+            std::cerr << "Usage: ./YAFU <ip> <command>  OR  ./YAFU <command> <ip>\n";
+            std::cerr << "Commands: discover, maintenance|jump2updater, application|def2run_application, restart, blink, program\n";
             return 1;
         }
-    }
-    else
-    {
-        std::cerr << "Unknown command: " << cmd << std::endl;
-        return 1;
+
+        simpleEthClient client;
+        if (!client.open(ip, 5.0)) return 1;
+
+        std::string scmd(cmd);
+        if (scmd == "discover") {
+            client.discover();
+        } else if (scmd == "maintenance" || scmd == "jump2updater") {
+            client.jump2updater();
+        } else if (scmd == "application" || scmd == "def2run_application") {
+            client.def2run_application();
+            sleep(1);
+            client.restart();
+        } else if (scmd == "restart") {
+            client.restart();
+        } else if (scmd == "blink") {
+            client.blink();
+        } else if (scmd == "program") {
+            if (!client.program()) {
+                std::cerr << "Programming failed\n";
+                return 1;
+            }
+        } else {
+            std::cerr << "Unknown command: " << scmd << std::endl;
+            return 1;
+        }
+        return 0;
     }
 
-    return 0;
+    std::cerr << "Usage: ./YAFU <ip> <command>  OR  ./YAFU <command> <ip>\n";
+    return 1;
 }

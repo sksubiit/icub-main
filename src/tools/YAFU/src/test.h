@@ -43,6 +43,8 @@ public:
     bool open(const char *ip, double rx_timeout_sec = 5.0);
     void closeSocket();
     bool sendRaw(const void *buf, size_t len);
+
+    // Board operations
     bool discover();
     bool jump2updater();
     bool def2run_application();

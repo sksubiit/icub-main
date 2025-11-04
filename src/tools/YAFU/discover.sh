@@ -3,14 +3,22 @@
 # This script discovery for multiple boards in parallel.
 # Usage: ./program_boards.sh <ip1> <ip2> ... <ipN>
 
+
+# directory of this script
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ensure logs directory exists and run from it
+mkdir -p "$script_dir/logs"
+cd "$script_dir/logs"
+
 # Check if at least one IP address is provided.
 if [ "$#" -eq 0 ]; then
     echo "Usage: $0 <ip1> <ip2> ... <ipN>"
     exit 1
 fi
 
-# Path to your executable. Adjust if it's in a different location.
-EXECUTABLE="../../../../../build/src/ICUB/bin/test_program"
+# Path to your executable .
+EXECUTABLE="$script_dir/../../../../../build/src/ICUB/bin/YAFU"
 
 # Check if the executable exists and is executable.
 if [ ! -x "$EXECUTABLE" ]; then
